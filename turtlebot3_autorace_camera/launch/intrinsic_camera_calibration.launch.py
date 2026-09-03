@@ -49,9 +49,10 @@ def generate_launch_description():
         executable='republish',
         name='republish',
         output='screen',
-        arguments=[
-            'compressed',
-            'raw'],
+        parameters=[{
+            'in_transport': 'compressed',
+            'out_transport': 'raw',
+        }],
         remappings=[
             ('in/compressed',
                 '/camera/image_raw/compressed'),
