@@ -1,0 +1,11 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python packaging / colcon build leftovers inside the source tree
+*.egg-info/
+.eggs/
+build/
+install/
+log/
