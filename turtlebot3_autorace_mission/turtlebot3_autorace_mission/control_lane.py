@@ -17,6 +17,7 @@
 # Author: Leon Jung, Gilbert, Ashe Kim, Hyungyu Kim, ChanHyeong Lee
 
 from geometry_msgs.msg import Twist
+from geometry_msgs.msg import TwistStamped
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool
@@ -54,7 +55,7 @@ class ControlLane(Node):
         )
 
         self.pub_cmd_vel = self.create_publisher(
-            Twist,
+            TwistStamped,
             '/control/cmd_vel',
             1
         )
@@ -92,13 +93,13 @@ class ControlLane(Node):
         # Linear velocity: adjust speed based on error (maximum 0.05 limit)
         twist.linear.x = min(self.MAX_VEL * (max(1 - abs(error) / 500, 0) ** 2.2), 0.05)
         twist.angular.z = -max(angular_z, -2.0) if angular_z < 0 else -min(angular_z, 2.0)
-        self.pub_cmd_vel.publish(twist)
+        self.publish_cmd_vel(twist)
 
     def callback_avoid_cmd(self, twist_msg):
         self.avoid_twist = twist_msg
 
         if self.avoid_active:
-            self.pub_cmd_vel.publish(self.avoid_twist)
+            self.publish_cmd_vel(self.avoid_twist)
 
     def callback_avoid_active(self, bool_msg):
         self.avoid_active = bool_msg.data
@@ -107,10 +108,17 @@ class ControlLane(Node):
         else:
             self.get_logger().info('Avoidance mode deactivated. Returning to lane following.')
 
+    def publish_cmd_vel(self, twist):
+        """Stamp a Twist and publish it as the TwistStamped the bridge expects."""
+        cmd_vel = TwistStamped()
+        cmd_vel.header.stamp = self.get_clock().now().to_msg()
+        cmd_vel.header.frame_id = ''
+        cmd_vel.twist = twist
+        self.pub_cmd_vel.publish(cmd_vel)
+
     def shut_down(self):
         self.get_logger().info('Shutting down. cmd_vel will be 0')
-        twist = Twist()
-        self.pub_cmd_vel.publish(twist)
+        self.publish_cmd_vel(Twist())
 
 
 def main(args=None):
