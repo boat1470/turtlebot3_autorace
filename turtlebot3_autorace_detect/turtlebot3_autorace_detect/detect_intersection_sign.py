@@ -19,6 +19,7 @@
 from enum import Enum
 import os
 
+from ament_index_python.packages import get_package_share_directory
 import cv2
 from cv_bridge import CvBridge
 import numpy as np
@@ -75,12 +76,17 @@ class DetectSign(Node):
         # Initiate SIFT detector
         self.sift = cv2.SIFT_create()
 
-        dir_path = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-        dir_path = os.path.join(dir_path, 'image')
+        dir_path = os.path.join(
+            get_package_share_directory('turtlebot3_autorace_detect'), 'image')
 
         self.img_intersection = cv2.imread(dir_path + '/intersection.png', 0)
         self.img_left = cv2.imread(dir_path + '/left.png', 0)
         self.img_right = cv2.imread(dir_path + '/right.png', 0)
+        if any(img is None for img in
+               (self.img_intersection, self.img_left, self.img_right)):
+            raise FileNotFoundError(
+                f'Reference sign image missing under {dir_path}'
+            )
 
         self.kp_intersection, self.des_intersection = self.sift.detectAndCompute(
             self.img_intersection, None
