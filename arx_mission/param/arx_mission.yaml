@@ -1,0 +1,77 @@
+---
+# One file for the whole package. The key is the wildcard rather than a node
+# name on purpose: the shipped detect_traffic_light.yaml is keyed on
+# /detect_traffic_light, so putting that node under a namespace makes the file
+# stop matching and every threshold silently falls back to its declared
+# default - which is wide open, so every mask matches everything.
+/**:
+  ros__parameters:
+
+    # --- traffic light thresholds --------------------------------------
+    # Carried over from turtlebot3_autorace_detect/param/traffic_light.
+    #
+    # Two things to know before trusting these on the real course:
+    #   * red 0-24 misses the wrap-around. True red straddles hue 0 and 179,
+    #     so a real lamp landing at 160-179 is invisible to this band.
+    #   * red 0-24 and yellow 19-33 overlap, so a yellow lamp can satisfy
+    #     both. The detector therefore tests green first and takes the first
+    #     hit - "is it green yet" is the only question the mission asks.
+    red:
+      hue_l: 0
+      hue_h: 24
+      saturation_l: 200
+      saturation_h: 255
+      lightness_l: 200
+      lightness_h: 255
+    yellow:
+      hue_l: 19
+      hue_h: 33
+      saturation_l: 237
+      saturation_h: 255
+      lightness_l: 231
+      lightness_h: 255
+    green:
+      hue_l: 40
+      hue_h: 113
+      saturation_l: 210
+      saturation_h: 255
+      lightness_l: 131
+      lightness_h: 255
+
+
+    # 0 = look at every frame. The original dropped two frames in three,
+    # which turns a 10 fps camera into 3.3 fps and makes each frame of
+    # confirmation cost a third of a second of race time.
+    frame_skip: 0
+    publish_debug_image: true
+    # Run the detector even when the mission layer has not armed it. Useful
+    # for tuning thresholds on their own; leave false for a real run.
+    always_on: false
+
+    # --- mission sequencing (arx_mission_control) -----------------------
+    rate_hz: 10.0
+    light:
+      enabled: true
+      # Frames of green, not ticks. Three frames at 10 fps is 0.3 s.
+      confirm_frames: 3
+      # Act on the change to green, not on a green that was already burning
+      # when the stack came up. Green lasts five seconds and the rules fail
+      # the mission for crossing the start line on any other signal, so
+      # joining a green with a second left would mean crossing on red. In
+      # simulation the light cycles from t=0 regardless, which puts roughly
+      # five starts in eleven mid-green. A real cycle is expected to begin at
+      # red, where this costs nothing.
+      require_transition: true
+
+    # --- lane following (arx_mission's forked control_lane) --------------
+    # The original hard-codes min(..., 0.05) here. Left at the same value so
+    # behaviour is unchanged, but it has to be reachable: the course is
+    # 16-18 m, which at 0.05 m/s is 320-360 s against a 300 s limit, before
+    # any mission stops are counted.
+    speed:
+      max: 0.05
+      # The official clock starts at the first green whether or not the robot
+      # moves, so a light that cannot be seen must still end in driving off.
+      # Missing this mission costs 20 points; never starting costs the run.
+      give_up_s: 25.0
+    release_ticks: 10
