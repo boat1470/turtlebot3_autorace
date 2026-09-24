@@ -3,15 +3,25 @@
 # Copyright 2026 boat1470
 # Licensed under the Apache License, Version 2.0
 
-"""Traffic light mission: the detector plus the sequencer that acts on it.
+"""The traffic light detector.
 
-Expects the camera pipeline and lane following to be up already:
+The sequencer used to be started here as well. It is in
+mission_control.launch.py now - it runs the intersection too, and will run the
+other four missions, so it was not the traffic light's to start.
 
-    ros2 launch turtlebot3_gazebo turtlebot3_autorace_2020.launch.py
-    ros2 launch turtlebot3_autorace_camera intrinsic_camera_calibration.launch.py
-    ros2 launch turtlebot3_autorace_camera extrinsic_camera_calibration.launch.py
-    ros2 launch turtlebot3_autorace_detect detect_lane.launch.py
-    ros2 launch turtlebot3_autorace_mission control_lane.launch.py
+This detector does nothing until mission_control arms it, so on its own it is
+only useful with always_on:=true, for tuning the thresholds:
+
+    ros2 launch arx_mission traffic_light.launch.py always_on:=true
+    ros2 run rqt_reconfigure rqt_reconfigure     # /arx_light_detector
+    ros2 run rqt_image_view rqt_image_view       # /arx/image_traffic_light/compressed
+
+Never leave always_on set for a real run. The rules allow props on the course
+that belong to no mission, and a detector that is always looking will stop the
+robot for one of them.
+
+Expects the camera pipeline to be up already. See mission_control.launch.py
+for the full running order, or use full.launch.py.
 """
 
 import os
@@ -25,12 +35,11 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    param_dir = os.path.join(get_package_share_directory('arx_mission'), 'param')
     # One file per node. All three detectors declare frame_skip and
     # publish_debug_image and want different values, and a /**: key hands
     # every node in a file the same value.
-    light_param_file = os.path.join(param_dir, 'light.yaml')
-    mission_param_file = os.path.join(param_dir, 'mission.yaml')
+    param_file = os.path.join(
+        get_package_share_directory('arx_mission'), 'param', 'light.yaml')
 
     use_sim_time = LaunchConfiguration('use_sim_time')
     always_on = LaunchConfiguration('always_on')
@@ -58,7 +67,7 @@ def generate_launch_description():
         name='arx_light_detector',
         output='screen',
         parameters=[
-            light_param_file,
+            param_file,
             {'use_sim_time': typed(use_sim_time, bool),
              'always_on': typed(always_on, bool)},
         ],
@@ -69,15 +78,4 @@ def generate_launch_description():
         ],
     )
 
-    mission_control = Node(
-        package='arx_mission',
-        executable='mission_control',
-        name='arx_mission_control',
-        output='screen',
-        parameters=[
-            mission_param_file,
-            {'use_sim_time': typed(use_sim_time, bool)},
-        ],
-    )
-
-    return LaunchDescription(args + [detect_traffic_light, mission_control])
+    return LaunchDescription(args + [detect_traffic_light])

@@ -11,10 +11,12 @@
 Arguments:
     sim:=false          attach to an already running simulator, or to the
                         real robot
-    calibration:=true   bring the detectors up in calibration mode, which is
-                        the only way their parameter callbacks get registered
-                        and therefore the only way rqt_reconfigure can change
-                        a threshold live
+    calibration:=true   bring detect_lane up in calibration mode, which turns
+                        its yellow lightness auto-adjust on and its white one
+                        off. It no longer has anything to do with whether
+                        rqt_reconfigure works - this package's detectors
+                        register their parameter callbacks in every mode.
+    debug_image:=true   publish the lane mask images
 
 Stages are separated by TimerAction because each one needs the topic the
 previous one publishes: the camera pipeline has nothing to rectify until the
@@ -51,13 +53,15 @@ def include(package, launch_file, condition=None, **kwargs):
 def generate_launch_description():
     sim = LaunchConfiguration('sim')
     calibration = LaunchConfiguration('calibration')
+    debug_image = LaunchConfiguration('debug_image')
 
     args = [
         DeclareLaunchArgument('sim', default_value='true',
                               description='Start the Gazebo simulator too.'),
         DeclareLaunchArgument('calibration', default_value='false',
-                              description='Detectors in calibration mode, so '
-                                          'rqt_reconfigure can retune them live.'),
+                              description='detect_lane in calibration mode.'),
+        DeclareLaunchArgument('debug_image', default_value='false',
+                              description='Publish the lane mask images.'),
     ]
 
     simulator = include('turtlebot3_gazebo', 'turtlebot3_autorace_2020.launch.py',
@@ -70,22 +74,33 @@ def generate_launch_description():
     ]
 
     lane = [
-        include('turtlebot3_autorace_detect', 'detect_lane.launch.py',
-                calibration_mode=calibration),
+        # ours, not turtlebot3_autorace_detect's: this one survives losing
+        # both lane lines at once
+        include('arx_mission', 'detect_lane.launch.py',
+                calibration_mode=calibration, debug_image=debug_image),
         # ours, not turtlebot3_autorace_mission's: this one starts held
         include('arx_mission', 'control_lane.launch.py'),
     ]
 
-    mission = include('arx_mission', 'traffic_light.launch.py')
+    mission = [
+        include('arx_mission', 'mission_control.launch.py'),
+        # Both detectors idle until mission_control arms them, so their
+        # position in the order only has to be after the camera pipeline.
+        include('arx_mission', 'traffic_light.launch.py'),
+        include('arx_mission', 'detect_sign.launch.py'),
+    ]
 
     # The sequencer still comes up before control_lane. It no longer has to -
     # this package's control_lane starts held and cannot move until
     # /arx/drive_enable says so - but this way the gate is already being
     # published when control_lane appears, so it never publishes the zero
     # Twist of a hold it was going to be told about anyway.
+    #
+    # Within the mission stage the sequencer is first for the same reason: it
+    # is what arms the detectors beside it.
     return LaunchDescription(args + [
         simulator,
         TimerAction(period=8.0, actions=camera),
-        TimerAction(period=14.0, actions=[mission]),
+        TimerAction(period=14.0, actions=mission),
         TimerAction(period=16.0, actions=lane),
     ])
