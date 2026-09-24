@@ -50,6 +50,12 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Float64
 from std_msgs.msg import UInt8
 
+# ARX: /arx/follow_side - must match mission_control.py.
+FOLLOW_AUTO = 0
+FOLLOW_YELLOW = 1
+FOLLOW_WHITE = 2
+SIDE_NAMES = {FOLLOW_AUTO: 'auto', FOLLOW_YELLOW: 'yellow', FOLLOW_WHITE: 'white'}
+
 
 class DetectLane(Node):
 
@@ -196,6 +202,22 @@ class DetectLane(Node):
 
         self.pub_lane_state = self.create_publisher(UInt8, '/detect/lane_state', 1)
 
+        # ARX: which line to steer by, once the junction has been decided.
+        #
+        # Normally the centre is the mean of both lines, which keeps the
+        # robot in the middle of whatever it is already in. That is the wrong
+        # thing at a fork: both branches are lane, so the mean simply splits
+        # the difference and the robot goes wherever the geometry happens to
+        # push it.
+        #
+        # Steering by one line instead picks a branch, because the line
+        # itself goes into one of them. The arithmetic is the same the node
+        # already uses when only one line is visible - the line, plus or
+        # minus half a lane width - so following the yellow line is exactly
+        # what this node does anyway when the white one drops out.
+        self.follow_side = FOLLOW_AUTO
+        self.create_subscription(UInt8, '/arx/follow_side', self.cbFollowSide, 1)
+
         self.cvBridge = CvBridge()
 
         self.counter = 1
@@ -221,6 +243,15 @@ class DetectLane(Node):
         # ARX: was a single attribute shared by both lanes, so a failed
         # polyfit on one lane fell back to the other lane's curve.
         self.lane_fit_bef = {'left': None, 'right': None}
+
+    def cbFollowSide(self, msg):
+        """Latch which line to steer by (ARX)."""
+        if msg.data == self.follow_side:
+            return
+        self.follow_side = msg.data
+        self.get_logger().info(
+            'steering by the mean of both lines' if msg.data == FOLLOW_AUTO
+            else f'steering by the {SIDE_NAMES.get(msg.data, msg.data)} line')
 
     def cbGetDetectLaneParam(self, parameters):
         for param in parameters:
@@ -636,7 +667,40 @@ class DetectLane(Node):
         # after a run of good ones.
         centerx = None
 
-        if self.reliability_white_line > 50 and self.reliability_yellow_line > 50:
+        # ARX: a decided junction overrides everything below. Half a lane
+        # width from the chosen line, which is the same arithmetic the
+        # branches below use when only that line is visible.
+        #
+        # The condition includes has_left / has_right, so a frame where the
+        # chosen line is missing falls through to the normal logic rather
+        # than reporting nothing. Losing sight of it for a few frames on a
+        # curve is ordinary; refusing to steer at all until it comes back
+        # would not be.
+        if self.follow_side == FOLLOW_YELLOW and has_left:
+            centerx = np.add(self.left_fitx, 280)
+            pts_center = np.array([np.transpose(np.vstack([centerx, ploty]))])
+            lane_state.data = 1
+            cv2.polylines(
+                color_warp_lines,
+                np.int_([pts_center]),
+                isClosed=False,
+                color=(0, 255, 255),
+                thickness=12
+                )
+
+        elif self.follow_side == FOLLOW_WHITE and has_right:
+            centerx = np.subtract(self.right_fitx, 280)
+            pts_center = np.array([np.transpose(np.vstack([centerx, ploty]))])
+            lane_state.data = 3
+            cv2.polylines(
+                color_warp_lines,
+                np.int_([pts_center]),
+                isClosed=False,
+                color=(0, 255, 255),
+                thickness=12
+                )
+
+        elif self.reliability_white_line > 50 and self.reliability_yellow_line > 50:
             if has_right and has_left:  # ARX
                 centerx = np.mean([self.left_fitx, self.right_fitx], axis=0)
                 pts = np.hstack((pts_left, pts_right))

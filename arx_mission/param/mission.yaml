@@ -43,7 +43,11 @@
       # debug mode asked for while the detection itself is being trusted; the
       # turn is not written yet. Set false once there is a stage to hand over
       # to.
-      stop_after_detect: true
+      # Stop once the arrow is identified instead of acting on it. Purely a
+      # debug aid now: with this false the robot carries on and steers by the
+      # line the arrow chose - yellow for left, white for right - for the
+      # rest of the run.
+      stop_after_detect: false
 
       # Distance from the start line to the intersection sign is under two
       # metres, which at 0.05 m/s is about 40 s of driving. This is measured

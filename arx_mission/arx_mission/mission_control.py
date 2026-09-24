@@ -67,6 +67,16 @@ SIGN_RIGHT = 3
 
 SIGN_NAMES = {SIGN_LEFT: 'left', SIGN_RIGHT: 'right'}
 
+# /arx/follow_side - must match detect_lane.py. Which lane line detect_lane
+# should steer by once the junction has been decided: the yellow one on the
+# left, the white one on the right, or the usual mean of the two.
+FOLLOW_AUTO = 0
+FOLLOW_YELLOW = 1
+FOLLOW_WHITE = 2
+
+SIDE_FOR_SIGN = {SIGN_LEFT: FOLLOW_YELLOW, SIGN_RIGHT: FOLLOW_WHITE}
+SIDE_NAMES = {FOLLOW_AUTO: 'auto', FOLLOW_YELLOW: 'yellow', FOLLOW_WHITE: 'white'}
+
 # /arx/armed_mission - tells a detector to do its work, and every other
 # detector to idle. On the competition Raspberry Pi they cannot all run at
 # once, and nothing downstream reads a detector that is not armed anyway.
@@ -76,6 +86,7 @@ MISSION_INTERSECTION = 2
 
 STAGE_WAIT_GREEN = 'wait_green'
 STAGE_DRIVE_TO_SIGN = 'drive_to_sign'
+STAGE_FOLLOW_SIDE = 'follow_side'
 STAGE_STOPPED = 'stopped'
 
 
@@ -135,10 +146,9 @@ class MissionControl(Node):
         # longer than the gaps between reports while the board is actually
         # being seen.
         self.declare_parameter('intersection.vote_max_age_s', 3.0)
-        # Stop once the arrow is identified. The debug mode asked for while
-        # the detection itself is still being trusted; there is no turn to
-        # hand over to yet.
-        self.declare_parameter('intersection.stop_after_detect', True)
+        # Stop once the arrow is identified instead of acting on it. Purely
+        # a debug aid now that there is something to hand over to.
+        self.declare_parameter('intersection.stop_after_detect', False)
         # Measured from the moment the robot is released, not from the sign
         # coming into view, so it has to cover the whole approach.
         self.declare_parameter('intersection.give_up_s', 40.0)
@@ -210,6 +220,7 @@ class MissionControl(Node):
         # restarted mid-run picks the state up within one tick instead of
         # sitting held forever.
         self.pub_drive = self.create_publisher(Bool, '/arx/drive_enable', 1)
+        self.pub_side = self.create_publisher(UInt8, '/arx/follow_side', 1)
         self.create_subscription(UInt8, '/arx/traffic_light', self.on_light, 1)
         self.create_subscription(UInt8, '/detect/traffic_sign', self.on_sign, 1)
         self.create_subscription(Odometry, '/odom', self.on_odom, 1)
@@ -331,6 +342,11 @@ class MissionControl(Node):
         msg.data = int(mission)
         self.pub_armed.publish(msg)
 
+    def set_follow_side(self, side):
+        msg = UInt8()
+        msg.data = int(side)
+        self.pub_side.publish(msg)
+
     def start(self, why):
         self.go(STAGE_DRIVE_TO_SIGN, why)
         self.set_driving(True)
@@ -348,12 +364,15 @@ class MissionControl(Node):
             self.tick_wait_green(now)
         elif self.stage == STAGE_DRIVE_TO_SIGN:
             self.tick_drive_to_sign(now)
+        elif self.stage == STAGE_FOLLOW_SIDE:
+            self.tick_follow_side()
         else:
             self.tick_stopped()
 
     def tick_wait_green(self, now):
         self.set_armed(MISSION_TRAFFIC_LIGHT)
         self.set_driving(False)
+        self.set_follow_side(FOLLOW_AUTO)
         if not self.get_parameter('light.enabled').value:
             self.start('traffic light check disabled')
             return
@@ -388,15 +407,9 @@ class MissionControl(Node):
         # for one of them in the middle of the course would be worse than
         # anything the light itself can cost.
         self.set_driving(True)
+        self.set_follow_side(FOLLOW_AUTO)
 
         if not self.get_parameter('intersection.enabled').value:
-            self.set_armed(MISSION_NONE)
-            return
-
-        # Already decided, and told not to stop for it. Nothing left to look
-        # at, so let the detector idle - there is no turn stage yet, so the
-        # robot simply carries on.
-        if self.decision is not None:
             self.set_armed(MISSION_NONE)
             return
 
@@ -412,7 +425,11 @@ class MissionControl(Node):
                 f'({self.sign_msgs} reports seen, {self.sign_rejected} '
                 f'ignored on heading)')
             if self.get_parameter('intersection.stop_after_detect').value:
-                self.stop(f'sign {name} - stopping here for now')
+                self.stop(f'sign {name} - stopping here, as asked')
+            else:
+                self.go(STAGE_FOLLOW_SIDE,
+                        f'sign {name} - steering by the '
+                        f'{SIDE_NAMES[SIDE_FOR_SIGN[winner]]} line from here')
             return
 
         waited = now - self.stage_since
@@ -434,11 +451,23 @@ class MissionControl(Node):
                    f'last {len(recent)}: {recent}')
             self.get_logger().warn(
                 f'no sign confirmed after {waited:.0f} s ({why})')
-            self.stop('gave up on the sign')
+            # Carry on rather than stop. The same reasoning as the traffic
+            # light's give-up: the clock does not pause for a detector that
+            # failed, and stopping here loses every mission after this one as
+            # well as this one. Steering stays on the mean of both lines,
+            # which is what the robot was already doing.
+            self.go(STAGE_FOLLOW_SIDE, 'gave up on the sign - carrying on')
+
+    def tick_follow_side(self):
+        """Drive on, steering by whichever line the junction chose."""
+        self.set_armed(MISSION_NONE)
+        self.set_driving(True)
+        self.set_follow_side(SIDE_FOR_SIGN.get(self.decision, FOLLOW_AUTO))
 
     def tick_stopped(self):
         self.set_armed(MISSION_NONE)
         self.set_driving(False)
+        self.set_follow_side(FOLLOW_AUTO)
 
 
 def main(args=None):
