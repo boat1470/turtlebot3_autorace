@@ -25,8 +25,12 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
-    param_file = os.path.join(
-        get_package_share_directory('arx_mission'), 'param', 'arx_mission.yaml')
+    param_dir = os.path.join(get_package_share_directory('arx_mission'), 'param')
+    # One file per node. All three detectors declare frame_skip and
+    # publish_debug_image and want different values, and a /**: key hands
+    # every node in a file the same value.
+    light_param_file = os.path.join(param_dir, 'light.yaml')
+    mission_param_file = os.path.join(param_dir, 'mission.yaml')
 
     use_sim_time = LaunchConfiguration('use_sim_time')
     always_on = LaunchConfiguration('always_on')
@@ -54,7 +58,7 @@ def generate_launch_description():
         name='arx_light_detector',
         output='screen',
         parameters=[
-            param_file,
+            light_param_file,
             {'use_sim_time': typed(use_sim_time, bool),
              'always_on': typed(always_on, bool)},
         ],
@@ -71,7 +75,7 @@ def generate_launch_description():
         name='arx_mission_control',
         output='screen',
         parameters=[
-            param_file,
+            mission_param_file,
             {'use_sim_time': typed(use_sim_time, bool)},
         ],
     )

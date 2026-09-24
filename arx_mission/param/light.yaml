@@ -1,0 +1,53 @@
+---
+# Thresholds and frame policy for arx_mission's detect_traffic_light.
+#
+# The key is the wildcard rather than a node name on purpose: the shipped
+# detect_traffic_light.yaml is keyed on /detect_traffic_light, so putting that
+# node under a namespace makes the file stop matching and every threshold
+# silently falls back to its declared default - which is wide open, so every
+# mask matches everything.
+#
+# One file per detector, not one for the package. All three detectors declare
+# frame_skip and publish_debug_image and want different values for them, and a
+# /**: key hands every node in the file the same value.
+/**:
+  ros__parameters:
+
+    # Carried over from turtlebot3_autorace_detect/param/traffic_light.
+    #
+    # Two things to know before trusting these on the real course:
+    #   * red 0-24 misses the wrap-around. True red straddles hue 0 and 179,
+    #     so a real lamp landing at 160-179 is invisible to this band.
+    #   * red 0-24 and yellow 19-33 overlap, so a yellow lamp can satisfy
+    #     both. The detector therefore tests green last and lets it win -
+    #     "is it green yet" is the only question the mission asks.
+    red:
+      hue_l: 0
+      hue_h: 24
+      saturation_l: 200
+      saturation_h: 255
+      lightness_l: 200
+      lightness_h: 255
+    yellow:
+      hue_l: 19
+      hue_h: 33
+      saturation_l: 237
+      saturation_h: 255
+      lightness_l: 231
+      lightness_h: 255
+    green:
+      hue_l: 40
+      hue_h: 113
+      saturation_l: 210
+      saturation_h: 255
+      lightness_l: 131
+      lightness_h: 255
+
+    # 0 = look at every frame. The original dropped two frames in three,
+    # which turns a 10 fps camera into 3.3 fps and makes each frame of
+    # confirmation cost a third of a second of race time.
+    frame_skip: 0
+    publish_debug_image: true
+    # Run the detector even when the mission layer has not armed it. Useful
+    # for tuning thresholds on their own; leave false for a real run.
+    always_on: false

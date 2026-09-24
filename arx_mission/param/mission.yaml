@@ -1,0 +1,83 @@
+---
+# arx_mission_control and arx_control_lane. No detector reads this file, so
+# the /**: key collides with nothing.
+/**:
+  ros__parameters:
+    rate_hz: 10.0
+
+    light:
+      enabled: true
+      # Frames of green, not ticks. Three frames at 10 fps is 0.3 s.
+      confirm_frames: 3
+      # Act on the change to green, not on a green that was already burning
+      # when the stack came up. Green lasts five seconds and the rules fail
+      # the mission for crossing the start line on any other signal, so
+      # joining a green with a second left would mean crossing on red. In
+      # simulation the light cycles from t=0 regardless, which puts roughly
+      # five starts in eleven mid-green. A real cycle is expected to begin at
+      # red, where this costs nothing.
+      require_transition: true
+      # The official clock starts at the first green whether or not the robot
+      # moves, so a light that cannot be seen must still end in driving off.
+      # Missing this mission costs 20 points; never starting costs the run.
+      give_up_s: 25.0
+
+    intersection:
+      enabled: true
+      # A majority of the last `window` reports rather than a run of
+      # identical ones. Per-frame accuracy against the left board was
+      # measured at 76%, with the wrong answers scattered among the right
+      # ones - so a run of three identical reports can take seconds to turn
+      # up while a majority settles at once. See the note in
+      # mission_control.py.
+      window: 7
+      confirm_votes: 5
+
+      # How old a report may be and still count. Without this the window is
+      # seven reports however far apart they arrived: one run voted on
+      # reports fourteen seconds apart, by which time the robot was metres
+      # past the junction looking at something else.
+      vote_max_age_s: 3.0
+
+      # Stop once the sign is identified instead of carrying on. This is the
+      # debug mode asked for while the detection itself is being trusted; the
+      # turn is not written yet. Set false once there is a stage to hand over
+      # to.
+      stop_after_detect: true
+
+      # Distance from the start line to the intersection sign is under two
+      # metres, which at 0.05 m/s is about 40 s of driving. This is measured
+      # from the moment the robot is released, not from the sign coming into
+      # view, so it has to cover the whole approach.
+      give_up_s: 40.0
+
+      heading:
+        # Absolute heading, straight off /odom. Measured on a running stack,
+        # /odom's yaw is the same number gz reports for the world - only its
+        # position counts from the spawn point, and that frame is translated
+        # without being rotated.
+        #
+        # 180 +/- 45 is "facing west, give or take". The arrow board is
+        # 0.12 m wide and 0.025 m thick, turned -90 degrees in the world
+        # file, so its broad faces are normal to the world x axis:
+        #
+        #   looking along y (how the robot sets off)  12 px of edge, never matched
+        #   looking along x                           22-93 px of face, 27 good / 17 inliers
+        #
+        # So this is not a question of where on the course the robot is. It
+        # is whether the board can be seen at all from where the robot is
+        # pointing - and a report that arrives while it is edge-on is a
+        # report about something else. The rules allow signs on the course
+        # that belong to no mission.
+        #
+        # The robot spawns at +90 (facing north, along +y).
+        enabled: true
+        center_deg: 180.0
+        tolerance_deg: 45.0
+
+    # The original control_lane hard-codes min(..., 0.05) here. Left at the
+    # same value so behaviour is unchanged, but it has to be reachable: the
+    # course is 16-18 m, which at 0.05 m/s is 320-360 s against a 300 s
+    # limit, before any mission stops are counted.
+    speed:
+      max: 0.05

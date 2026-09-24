@@ -1,0 +1,52 @@
+---
+# arx_mission's detect_lane. HSV bands copied verbatim from
+# turtlebot3_autorace_detect/param/lane/lane.yaml, re-keyed from /detect_lane
+# to the wildcard so a namespace cannot detach them. See light.yaml.
+/**:
+  ros__parameters:
+    detect:
+      lane:
+        white:
+          hue_l: 0
+          hue_h: 179
+          saturation_l: 0
+          saturation_h: 70
+          lightness_l: 105
+          lightness_h: 255
+        yellow:
+          hue_l: 10
+          hue_h: 127
+          saturation_l: 70
+          saturation_h: 255
+          lightness_l: 95
+          lightness_h: 255
+
+    lane:
+      # Left at the original's 2-in-3 drop. /camera/image_projected runs at
+      # 8.78 Hz measured, so this is what puts /detect/lane at ~2.9 Hz, and
+      # control_lane's D term therefore sees a real dt of 0.34 s - about
+      # 1.7 cm of travel per correction at 0.05 m/s.
+      #
+      # 0 processes every frame and is the first thing to try when raising
+      # the speed. It is a tuning change, not a fix, so it is not the
+      # default: the lane tuning in this file is known to work at 3.
+      frame_skip: 3
+
+      # The white and yellow mask images on /detect/image_output_sub1 and
+      # sub2. In the original these exist only in calibration mode, which
+      # also switches the lightness auto-adjust over - so looking at a mask
+      # meant changing the behaviour being looked at.
+      publish_debug_image: false
+
+      # The original's asymmetry, preserved rather than fixed: white adjusts
+      # its lightness floor when NOT calibrating, yellow adjusts when it IS.
+      # Almost certainly a typo upstream, but changing it changes a tuning
+      # the robot is currently driving on, so it stays until there is a run
+      # to compare against.
+      auto_adjust_white: true
+      auto_adjust_yellow: false
+
+      # Logged every processed frame in the original, at rosout severity
+      # info. That is ~3 messages a second of network traffic on the Pi for
+      # a number that /detect/lane_state already carries.
+      log_lane_state: false

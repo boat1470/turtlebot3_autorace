@@ -24,7 +24,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     param_file = os.path.join(
-        get_package_share_directory('arx_mission'), 'param', 'arx_mission.yaml')
+        get_package_share_directory('arx_mission'), 'param', 'mission.yaml')
 
     control_lane = Node(
         package='arx_mission',

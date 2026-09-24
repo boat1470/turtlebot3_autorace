@@ -1,0 +1,48 @@
+---
+# arx_mission's detect_intersection_sign. See light.yaml for why every
+# detector gets its own file rather than sharing one /**: key.
+/**:
+  ros__parameters:
+    sign:
+      # Good matches a reference image needs before it is considered at all.
+      # The original wrote `len(good) > MIN_MATCH_COUNT` with MIN_MATCH_COUNT
+      # set to 5, so its real threshold was six; this is that number, spelt
+      # the way it behaves.
+      min_match_count: 6
+
+      # Despite the name in the original, this is not a measure of how well
+      # the sign matched. fnCalcMSE compares the keypoints' camera-frame
+      # coordinates against their coordinates in the reference image, which
+      # is 92x112 - so it rejects a sign that is far from the top-left of the
+      # frame, and its useful value changes with camera resolution.
+      #
+      # Kept at the original number because the camera is unchanged. Raise it
+      # if the detector goes quiet on a sign that rqt_image_view shows is
+      # plainly matching.
+      max_mse: 70000.0
+
+      # RANSAC inliers the match must survive on. A frame can otherwise pass
+      # min_match_count and max_mse with every match rejected as an outlier,
+      # which means they were scattered across the picture rather than
+      # describing one sign. A run through the junction reported
+      # "Detect right sign (0 inliers)" three times and outvoted the one
+      # report with real support behind it, on a course whose only arrow is
+      # the left one.
+      #
+      # Four is a floor, not a tuning knob: a homography is fitted from four
+      # points, so fewer than four inliers means no consistent model was
+      # found at all. Raise it to demand a stronger sign.
+      min_inliers: 4
+
+      # SIFT over the whole frame is the most expensive thing in this stack,
+      # so unlike the traffic light this one keeps the original's 2-in-3
+      # drop. Confirmation costs 3 frames either way; what matters is that
+      # the robot is still moving while it confirms.
+      frame_skip: 3
+      publish_debug_image: true
+      always_on: false
+
+      # Empty means arx_mission's own image/ directory, whose README explains
+      # why the ones in turtlebot3_autorace_detect are not used here. Set this
+      # to a path to swap in a set cut on practice day.
+      image_dir: ''
