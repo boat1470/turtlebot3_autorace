@@ -17,6 +17,8 @@
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
+  <!-- mission_control reads /odom for the intersection heading gate -->
+  <depend>nav_msgs</depend>
   <depend>cv_bridge</depend>
   <depend>python3-opencv</depend>
   <depend>python3-numpy</depend>
