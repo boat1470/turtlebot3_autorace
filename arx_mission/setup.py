@@ -17,6 +17,7 @@ setup(
         # on its declared defaults without saying anything.
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'param'), glob('param/*.yaml')),
+        (os.path.join('share', package_name, 'image'), glob('image/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
