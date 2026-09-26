@@ -261,11 +261,15 @@ class DetectLane(Node):
             np.mean(self.mov_avg_right[::-1][:, 2][0:MOV_AVG_LENGTH])
             ])
 
+        # Keep the NEWEST rows, not the oldest. The moving average above reads
+        # mov_avg[::-1][0:MOV_AVG_LENGTH], i.e. the most recent frames, so
+        # trimming to [0:MOV_AVG_LENGTH] hands it five frames from a thousand
+        # frames ago - about two and a half minutes at the rate this runs.
         if self.mov_avg_left.shape[0] > 1000:
-            self.mov_avg_left = self.mov_avg_left[0:MOV_AVG_LENGTH]
+            self.mov_avg_left = self.mov_avg_left[-MOV_AVG_LENGTH:]
 
         if self.mov_avg_right.shape[0] > 1000:
-            self.mov_avg_right = self.mov_avg_right[0:MOV_AVG_LENGTH]
+            self.mov_avg_right = self.mov_avg_right[-MOV_AVG_LENGTH:]
 
         self.make_lane(cv_image, white_fraction, yellow_fraction)
 
@@ -419,7 +423,7 @@ class DetectLane(Node):
 
         nwindows = 20
 
-        window_height = np.int_(img_w.shape[0] / nwindows)
+        window_height = np.int_(img_w.shape[0] / nwindows) # 600/20 = 30
 
         nonzero = img_w.nonzero()
         nonzeroy = np.array(nonzero[0])
@@ -434,8 +438,8 @@ class DetectLane(Node):
         lane_inds = []
 
         for window in range(nwindows):
-            win_y_low = img_w.shape[0] - (window + 1) * window_height
-            win_y_high = img_w.shape[0] - window * window_height
+            win_y_low = img_w.shape[0] - (window + 1) * window_height   #600 - (1-20)*30
+            win_y_high = img_w.shape[0] - window * window_height        #600 - (0-19)*30
             win_x_low = x_current - margin
             win_x_high = x_current + margin
 
