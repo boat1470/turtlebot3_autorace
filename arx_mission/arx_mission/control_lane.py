@@ -144,6 +144,13 @@ class ControlLane(Node):
             self.publish_cmd_vel(self.avoid_twist)
 
     def callback_avoid_active(self, bool_msg):
+        # ARX: log on the change, not on every message. The original logged
+        # each one, and mission_control republishes this every tick so a node
+        # restarted mid-run picks the state up - which is ten identical lines
+        # a second, drowning everything else in the log. Same fix as
+        # callback_drive_enable below, which this file already had.
+        if bool_msg.data == self.avoid_active:
+            return
         self.avoid_active = bool_msg.data
         if self.avoid_active:
             self.get_logger().info('Avoidance mode activated.')
