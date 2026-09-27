@@ -80,6 +80,27 @@
         center_deg: 180.0
         tolerance_deg: 45.0
 
+    # --- lane following (arx_control_lane) ------------------------------
+    control:
+      kp: 0.0025
+
+      # A rate, not a raw frame-to-frame difference. /detect/lane arrives at
+      # 1.9 Hz here - frames where the lane is lost publish nothing at all -
+      # so the original `error - last_error` was a step taken over 0.53 s.
+      # Times the original 0.007 that reached 2 rad/s and saturated the
+      # clamp: the D term was whipping the robot rather than damping it, and
+      # it outweighed P in 45 of 146 updates. Dividing by the measured dt
+      # makes the gain mean the same thing at any frame rate.
+      #
+      # 0.0037 = 0.007 x 0.53, so behaviour at today's rate is unchanged and
+      # stays put when lane.frame_skip changes.
+      kd: 0.0037
+
+      # Most the published angular velocity may change between one lane
+      # message and the next. The backstop for smoothness whatever the error
+      # does; 0 turns it off.
+      max_angular_step: 0.35
+
     # The original control_lane hard-codes min(..., 0.05) here. Left at the
     # same value so behaviour is unchanged, but it has to be reachable: the
     # course is 16-18 m, which at 0.05 m/s is 320-360 s against a 300 s

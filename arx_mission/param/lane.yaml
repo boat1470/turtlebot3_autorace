@@ -30,7 +30,14 @@
       # 0 processes every frame and is the first thing to try when raising
       # the speed. It is a tuning change, not a fix, so it is not the
       # default: the lane tuning in this file is known to work at 3.
-      frame_skip: 3
+      # Was 3, which with an 8.78 Hz projected stream put /detect/lane at
+      # 1.9 Hz - the steering was corrected less than twice a second, or
+      # once every 2.6 cm of travel. 1 roughly triples that. The D term is a
+      # true rate now, so raising this does not need the gains retuned.
+      #
+      # Costs three times the CPU in this node. Fine in simulation; measure
+      # on the Pi before trusting it there.
+      frame_skip: 1
 
       # The white and yellow mask images on /detect/image_output_sub1 and
       # sub2. In the original these exist only in calibration mode, which

@@ -39,6 +39,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool
 from std_msgs.msg import Float64
+from std_msgs.msg import UInt8
 
 
 class ControlLane(Node):
@@ -70,6 +71,18 @@ class ControlLane(Node):
             self.callback_avoid_active,
             1
         )
+        # ARX: detect_lane changes how it computes the centre when it
+        # switches between seeing both lines and seeing one - mean of the two
+        # versus line plus or minus half a lane width. That moves the target
+        # 150 px in a single frame while the robot has not moved at all, and
+        # the derivative reads it as enormous speed. Two of the four worst
+        # kicks in a traced run were exactly this.
+        self.sub_lane_state = self.create_subscription(
+            UInt8,
+            '/detect/lane_state',
+            self.callback_lane_state,
+            1
+        )
         # ARX: the go signal, published by arx_mission's mission_control.
         self.sub_drive_enable = self.create_subscription(
             Bool,
@@ -84,8 +97,34 @@ class ControlLane(Node):
             1
         )
 
+        # ARX: the gains were literals, and there was no way to retune
+        # them without editing and rebuilding.
+        self.declare_parameter('control.kp', 0.0025)
+        # A rate now, not a raw frame-to-frame difference. Measured on this
+        # course, /detect/lane arrives at 1.9 Hz - frames where the lane is
+        # lost publish nothing at all - so `error - last_error` was a step
+        # taken over 0.53 s. Multiplied by the original 0.007 that reached
+        # 2 rad/s and saturated the clamp: the D term was whipping the robot
+        # rather than damping it, and it outweighed the P term in 45 of 146
+        # updates. Dividing by the measured dt makes the gain mean the same
+        # thing at any frame rate.
+        #
+        # 0.0037 is 0.007 x 0.53, so the behaviour at today's rate is
+        # unchanged - and stays put when lane.frame_skip changes.
+        self.declare_parameter('control.kd', 0.0037)
+        # Most the published angular velocity may change between one lane
+        # message and the next. The backstop for smoothness whatever the
+        # error does; 0 turns it off.
+        self.declare_parameter('control.max_angular_step', 0.35)
+
         # PD control related variables
-        self.last_error = 0
+        # ARX: None rather than 0 - "no previous sample", so the first
+        # update after a start, a stop or a lane_state change contributes no
+        # derivative at all instead of a spurious one.
+        self.last_error = None
+        self.last_time = None
+        self.last_angular = None
+        self.lane_state = None
         self.MAX_VEL = 0.1
 
         # ARX: the original's hard-coded ceiling, now a parameter. Left at the
@@ -124,18 +163,41 @@ class ControlLane(Node):
         center = desired_center.data
         error = center - 500
 
-        Kp = 0.0025
-        Kd = 0.007
+        # ARX: a real derivative, over the time that actually elapsed.
+        now = self.get_clock().now().nanoseconds * 1e-9
+        dt = None if self.last_time is None else now - self.last_time
+        self.last_time = now
 
-        angular_z = Kp * error + Kd * (error - self.last_error)
+        derivative = 0.0
+        if self.last_error is not None and dt is not None and dt > 1e-3:
+            derivative = (error - self.last_error) / dt
         self.last_error = error
+
+        angular_z = (self.get_parameter('control.kp').value * error +
+                     self.get_parameter('control.kd').value * derivative)
 
         twist = Twist()
         # Linear velocity: adjust speed based on error (maximum 0.05 limit)
         ceiling = self.get_parameter('speed.max').value      # ARX: was a literal 0.05
         twist.linear.x = min(self.MAX_VEL * (max(1 - abs(error) / 500, 0) ** 2.2), ceiling)
-        twist.angular.z = -max(angular_z, -2.0) if angular_z < 0 else -min(angular_z, 2.0)
+        angular = -max(angular_z, -2.0) if angular_z < 0 else -min(angular_z, 2.0)
+        # ARX: rate limit. Whatever the error does, the wheels are not asked
+        # to change what they are doing faster than this.
+        step = self.get_parameter('control.max_angular_step').value
+        if step > 0 and self.last_angular is not None:
+            angular = max(min(angular, self.last_angular + step),
+                          self.last_angular - step)
+        self.last_angular = angular
+        twist.angular.z = angular
         self.publish_cmd_vel(twist)
+
+    # ARX: added.
+    def callback_lane_state(self, msg):
+        """Forget the previous error when the centre changes meaning."""
+        if msg.data == self.lane_state:
+            return
+        self.lane_state = msg.data
+        self.last_error = None
 
     def callback_avoid_cmd(self, twist_msg):
         self.avoid_twist = twist_msg
@@ -165,7 +227,8 @@ class ControlLane(Node):
         # The D term is a difference against the previous sample, so resuming
         # with an error from before the stop produces a one-frame kick. The
         # original has the same flaw across an avoidance episode.
-        self.last_error = 0
+        self.last_error = None
+        self.last_time = None
         self.get_logger().info(
             'driving enabled' if self.driving else 'driving disabled - holding')
 
