@@ -125,7 +125,23 @@ class ControlLane(Node):
         self.last_time = None
         self.last_angular = None
         self.lane_state = None
-        self.MAX_VEL = 0.1
+
+        # ARX: was a hard-coded 0.1, and it is the ceiling that actually
+        # bites first. linear.x is
+        #
+        #     min(max_vel * (1 - |error|/500) ** 2.2, speed.max)
+        #
+        # so with max_vel at 0.1 the speed cannot pass 0.1 however high
+        # speed.max is set, and the error term holds it below that most of
+        # the time - at an error of 100 px it is already down to 0.06. An
+        # invisible ceiling is the wrong thing to have in the way while the
+        # lap time is the problem.
+        #
+        # /control/max_vel still overrides it at run time; that is how the
+        # level crossing mission is meant to slow the robot down. This is the
+        # value it starts from.
+        self.declare_parameter('control.max_vel', 0.1)
+        self.MAX_VEL = self.get_parameter('control.max_vel').value
 
         # ARX: the original's hard-coded ceiling, now a parameter. Left at the
         # same value so nothing changes until someone chooses to raise it -
@@ -147,6 +163,14 @@ class ControlLane(Node):
         self.hold_timer = self.create_timer(0.1, self.hold_tick)
 
     def callback_get_max_vel(self, max_vel_msg):
+        # ARX: log it. This overrides control.max_vel for the rest of the
+        # run and nothing said so before, which would make a robot that had
+        # quietly been slowed impossible to tell from one that was badly
+        # tuned.
+        if max_vel_msg.data != self.MAX_VEL:
+            self.get_logger().info(
+                f'max_vel overridden on /control/max_vel: '
+                f'{self.MAX_VEL:.3f} -> {max_vel_msg.data:.3f} m/s')
         self.MAX_VEL = max_vel_msg.data
 
     def callback_follow_lane(self, desired_center):
@@ -179,7 +203,8 @@ class ControlLane(Node):
         twist = Twist()
         # Linear velocity: adjust speed based on error (maximum 0.05 limit)
         ceiling = self.get_parameter('speed.max').value      # ARX: was a literal 0.05
-        twist.linear.x = min(self.MAX_VEL * (max(1 - abs(error) / 500, 0) ** 2.2), ceiling)
+        twist.linear.x = min(
+            self.MAX_VEL * (max(1 - abs(error) / 500, 0) ** 2.2), ceiling)
         angular = -max(angular_z, -2.0) if angular_z < 0 else -min(angular_z, 2.0)
         # ARX: rate limit. Whatever the error does, the wheels are not asked
         # to change what they are doing faster than this.

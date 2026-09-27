@@ -155,6 +155,21 @@
       # does; 0 turns it off.
       max_angular_step: 0.35
 
+      # The ceiling that actually bites first. linear.x is
+      #
+      #     min(max_vel * (1 - |error|/500) ** 2.2, speed.max)
+      #
+      # so speed.max cannot lift the robot above this however high it is
+      # set, and the error term holds it lower still - at 100 px of error
+      # it is already down to 0.06. It was hard-coded at 0.1.
+      #
+      # TurtleBot3 Burger tops out at 0.22 m/s.
+      #
+      # /control/max_vel overrides this at run time, which is how the level
+      # crossing mission is meant to slow the robot; this is the starting
+      # value.
+      max_vel: 0.1
+
     # The original control_lane hard-codes min(..., 0.05) here. Left at the
     # same value so behaviour is unchanged, but it has to be reachable: the
     # course is 16-18 m, which at 0.05 m/s is 320-360 s against a 300 s
