@@ -125,7 +125,18 @@
 
     # --- lane following (arx_control_lane) ------------------------------
     control:
-      kp: 0.0025
+      # Raised from the example's 0.0025. At that gain the robot had to be
+      # 71% of the way from the lane centre to the line before it asked for
+      # 0.5 rad/s - by which point it was already most of the way out. At
+      # 0.006 that same command comes at 30%.
+      #
+      # In a steady curve the error is roughly constant, so the D term
+      # contributes almost nothing: holding a curve is Kp's job alone.
+      #
+      # Ladder if this is not right: 0.004 / 0.006 / 0.008. Stop at the
+      # value that starts weaving on the straights - and if it weaves,
+      # lower kd rather than putting kp back.
+      kp: 0.006
 
       # A rate, not a raw frame-to-frame difference. /detect/lane arrives at
       # 1.9 Hz here - frames where the lane is lost publish nothing at all -
