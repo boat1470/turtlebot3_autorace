@@ -43,6 +43,7 @@ the next piece of work, not this one.
 from collections import deque
 import math
 
+from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
@@ -86,7 +87,11 @@ MISSION_INTERSECTION = 2
 
 STAGE_WAIT_GREEN = 'wait_green'
 STAGE_DRIVE_TO_SIGN = 'drive_to_sign'
+STAGE_TURN = 'turn'
 STAGE_FOLLOW_SIDE = 'follow_side'
+
+# /detect/lane_state, from detect_lane: which line it is steering by.
+LANE_STATE_FOR_SIDE = {FOLLOW_YELLOW: 1, FOLLOW_WHITE: 3}
 STAGE_STOPPED = 'stopped'
 
 
@@ -153,6 +158,64 @@ class MissionControl(Node):
         # coming into view, so it has to cover the whole approach.
         self.declare_parameter('intersection.give_up_s', 40.0)
 
+        # Turn towards the chosen line before handing over to it.
+        #
+        # Measured: at the moment the arrow is confirmed the robot is already
+        # past the board and pointing along the course, and the yellow line
+        # is a fragment in the top-left of the bird's-eye view - 8802 px,
+        # enough to pass the 3000 threshold and be fitted, but spanning only
+        # 309 of 600 rows. detect_lane does steer by it, and reports
+        # lane_state 1, but the fit sits near the middle of the frame rather
+        # than to the left, so `line + 280` puts the target at 714 out of
+        # 1000 and control_lane turns *right*. One run went from 158 degrees
+        # to 103 - clockwise - and took the wrong branch while reporting
+        # lane_state 1 the whole way.
+        #
+        # Turning towards the line first brings it properly into frame before
+        # anything steers by it.
+        self.declare_parameter('intersection.turn.enabled', True)
+        self.declare_parameter('intersection.turn.rate', 0.4)
+        self.declare_parameter('intersection.turn.speed', 0.0)
+        # How far to turn once the arrow is known, per side. Positive is
+        # counter-clockwise, so a left arrow is positive and a right one
+        # negative. The two are separate numbers because the junction is not
+        # symmetric.
+        #
+        # A fixed amount of rotation, not a heading to reach and not "turn
+        # until the line looks right". Both of those were tried. Aiming at a
+        # heading needs the heading the robot set off with, which is only
+        # right while this node has been up since the start. Waiting on the
+        # lane detector cannot tell a line that is merely visible from one
+        # that is usable: it handed over while the yellow fit still sat in
+        # the middle of the frame, `line + 280` put the steering target at
+        # 714 of 1000, and the robot turned right into the wrong branch while
+        # reporting lane_state 1 throughout.
+        # What the arrow is used for once it has been read.
+        #
+        # False, the default: only to decide which way to turn. The turn
+        # itself puts the robot into the branch, and lane following carries
+        # on exactly as it does everywhere else - whatever lane the robot now
+        # points into is the lane it follows.
+        #
+        # True also pins detect_lane to that side's line for the rest of the
+        # run. Measured on this course, that steers by `line + 280`, and 280
+        # is half a lane width - so it aims at the middle of the lane, not at
+        # the line. The turn it produced had a 0.41 m radius and needed 0.64 m
+        # of travel to come round 90 degrees, which the junction does not
+        # give it.
+        self.declare_parameter('intersection.follow_chosen_line', False)
+
+        self.declare_parameter('intersection.turn.left_deg', 30.0)
+        self.declare_parameter('intersection.turn.right_deg', -5.0)
+        # Ease in over the last stretch so a tick of rotation cannot overshoot
+        # by much. At 0.4 rad/s and 10 Hz a tick is 2.3 degrees. Capped at
+        # half the turn, so a 5 degree turn is not spent entirely crawling.
+        self.declare_parameter('intersection.turn.slow_within_deg', 10.0)
+        # Only a backstop now that the turn has a definite size: it catches
+        # odometry that never arrives, which would otherwise mean turning
+        # until the race ended.
+        self.declare_parameter('intersection.turn.give_up_s', 20.0)
+
         # Only believe the sign while the robot is pointing the right way.
         #
         # These are absolute headings, read straight off /odom. Measured on a
@@ -205,6 +268,14 @@ class MissionControl(Node):
         # that ambiguity is what made the sign impossible to debug before.
         self.sign_rejected = 0
         self.yaw = None
+        # Accumulated, not end minus start. The difference between two
+        # headings wraps into -180..180, so a 243 degree turn reads as 117
+        # and a cap of 270 could never fire. Caught by a unit test that
+        # turned the long way round.
+        self.turn_start_yaw = None
+        self.turn_last_yaw = None
+        self.turn_accum = 0.0
+        self.lane_state = None
         # Whether the last report was counted, so the log can say when that
         # changes. Without it the only record of the gate's work was the
         # give-up message, which a successful run never prints - so a run
@@ -221,6 +292,14 @@ class MissionControl(Node):
         # sitting held forever.
         self.pub_drive = self.create_publisher(Bool, '/arx/drive_enable', 1)
         self.pub_side = self.create_publisher(UInt8, '/arx/follow_side', 1)
+        # The example's own override path. control_lane returns early from
+        # lane following while avoid_active is set and relays whatever
+        # arrives on /avoid_control straight to /cmd_vel - without checking
+        # its drive_enable gate, so drive_enable must stay true here or
+        # hold_tick fights this at 10 Hz.
+        self.pub_avoid = self.create_publisher(Bool, '/avoid_active', 1)
+        self.pub_avoid_cmd = self.create_publisher(Twist, '/avoid_control', 1)
+        self.create_subscription(UInt8, '/detect/lane_state', self.on_lane_state, 1)
         self.create_subscription(UInt8, '/arx/traffic_light', self.on_light, 1)
         self.create_subscription(UInt8, '/detect/traffic_sign', self.on_sign, 1)
         self.create_subscription(Odometry, '/odom', self.on_odom, 1)
@@ -342,6 +421,23 @@ class MissionControl(Node):
         msg.data = int(mission)
         self.pub_armed.publish(msg)
 
+    def on_lane_state(self, msg):
+        """Remember what detect_lane is steering by, for the logs."""
+        self.lane_state = msg.data
+
+    def set_avoid(self, active, angular=0.0, linear=0.0):
+        """Take the wheel directly, or hand it back to lane following."""
+        flag = Bool()
+        flag.data = bool(active)
+        self.pub_avoid.publish(flag)
+        if active:
+            # Republished every tick: control_lane forwards a command only
+            # when one arrives, on a volatile depth-1 subscription.
+            twist = Twist()
+            twist.linear.x = float(linear)
+            twist.angular.z = float(angular)
+            self.pub_avoid_cmd.publish(twist)
+
     def set_follow_side(self, side):
         msg = UInt8()
         msg.data = int(side)
@@ -364,6 +460,8 @@ class MissionControl(Node):
             self.tick_wait_green(now)
         elif self.stage == STAGE_DRIVE_TO_SIGN:
             self.tick_drive_to_sign(now)
+        elif self.stage == STAGE_TURN:
+            self.tick_turn(now)
         elif self.stage == STAGE_FOLLOW_SIDE:
             self.tick_follow_side()
         else:
@@ -373,6 +471,7 @@ class MissionControl(Node):
         self.set_armed(MISSION_TRAFFIC_LIGHT)
         self.set_driving(False)
         self.set_follow_side(FOLLOW_AUTO)
+        self.set_avoid(False)
         if not self.get_parameter('light.enabled').value:
             self.start('traffic light check disabled')
             return
@@ -408,6 +507,7 @@ class MissionControl(Node):
         # anything the light itself can cost.
         self.set_driving(True)
         self.set_follow_side(FOLLOW_AUTO)
+        self.set_avoid(False)
 
         if not self.get_parameter('intersection.enabled').value:
             self.set_armed(MISSION_NONE)
@@ -426,6 +526,12 @@ class MissionControl(Node):
                 f'ignored on heading)')
             if self.get_parameter('intersection.stop_after_detect').value:
                 self.stop(f'sign {name} - stopping here, as asked')
+            elif self.get_parameter('intersection.turn.enabled').value:
+                self.turn_start_yaw = self.yaw
+                self.turn_last_yaw = self.yaw
+                self.turn_accum = 0.0
+                self.go(STAGE_TURN,
+                        f'sign {name} - turning {self.turn_target():+.0f} deg')
             else:
                 self.go(STAGE_FOLLOW_SIDE,
                         f'sign {name} - steering by the '
@@ -458,16 +564,106 @@ class MissionControl(Node):
             # which is what the robot was already doing.
             self.go(STAGE_FOLLOW_SIDE, 'gave up on the sign - carrying on')
 
+    def accumulate_turn(self):
+        """Add this tick's rotation to the running total."""
+        if self.yaw is None:
+            return
+        if self.turn_last_yaw is not None:
+            self.turn_accum += (self.yaw - self.turn_last_yaw + 180.0) % 360.0 - 180.0
+        self.turn_last_yaw = self.yaw
+
+    def turned_so_far(self):
+        """Degrees turned since the turn began, unwrapped, or None."""
+        if self.turn_start_yaw is None:
+            return None
+        return self.turn_accum
+
+    def turn_target(self):
+        """Degrees to turn for the arrow that was confirmed; + is left."""
+        side = SIDE_FOR_SIGN.get(self.decision)
+        if side == FOLLOW_YELLOW:
+            return self.get_parameter('intersection.turn.left_deg').value
+        if side == FOLLOW_WHITE:
+            return self.get_parameter('intersection.turn.right_deg').value
+        return 0.0
+
+    def tick_turn(self, now):
+        """Turn the fixed amount the confirmed arrow calls for, then hand over."""
+        self.set_armed(MISSION_NONE)
+        # Set during the turn rather than at the hand-over, so detect_lane is
+        # already fitting the chosen line by the time the turn ends. Does
+        # nothing when follow_chosen_line is off.
+        self.set_follow_side(self.chosen_side())
+        # True throughout: control_lane ignores lane following while
+        # avoid_active is set, but its hold_tick would publish zeros over the
+        # turn if drive_enable went false.
+        self.set_driving(True)
+
+        self.accumulate_turn()
+
+        target = self.turn_target()
+        turned = self.turned_so_far()
+        if turned is None:
+            self.get_logger().warn(
+                'no odometry, so the turn cannot be measured - going on', once=True)
+            self.finish_turn('no odometry')
+            return
+
+        remaining = target - turned
+        # Signed, so this is "has it gone far enough in the intended
+        # direction", not "is it close to the right amount" - overshooting
+        # stops the turn rather than reversing it.
+        if (target >= 0 and remaining <= 0) or (target < 0 and remaining >= 0):
+            self.finish_turn(f'turned the {abs(target):.0f} deg asked for')
+            return
+
+        rate = self.get_parameter('intersection.turn.rate').value
+        # Never more than half the turn, or a five degree turn would be spent
+        # entirely crawling.
+        slow = min(self.get_parameter('intersection.turn.slow_within_deg').value,
+                   abs(target) * 0.5)
+        if slow > 0 and abs(remaining) < slow:
+            rate *= max(abs(remaining) / slow, 0.25)
+        angular = rate if target >= 0 else -rate
+        self.set_avoid(True, angular=angular,
+                       linear=self.get_parameter('intersection.turn.speed').value)
+
+        waited = now - self.stage_since
+        if waited > self.get_parameter('intersection.turn.give_up_s').value:
+            self.get_logger().warn(
+                f'turned {turned:+.0f} of {target:+.0f} deg in {waited:.0f} s '
+                f'- going on anyway')
+            self.finish_turn('turn timed out')
+
+    def finish_turn(self, why):
+        """Stop turning and hand the wheel back to lane following."""
+        turned = self.turned_so_far()
+        # One last zero command, so control_lane is not left relaying the
+        # rotation it was given on the tick before avoid_active went false.
+        self.set_avoid(True, angular=0.0, linear=0.0)
+        self.set_avoid(False)
+        self.go(STAGE_FOLLOW_SIDE,
+                f'{why} after turning {turned:+.0f} deg'
+                if turned is not None else why)
+
+    def chosen_side(self):
+        """The line to steer by, or auto when the arrow only picked a turn."""
+        if not self.get_parameter('intersection.follow_chosen_line').value:
+            return FOLLOW_AUTO
+        return SIDE_FOR_SIGN.get(self.decision, FOLLOW_AUTO)
+
     def tick_follow_side(self):
         """Drive on, steering by whichever line the junction chose."""
         self.set_armed(MISSION_NONE)
         self.set_driving(True)
-        self.set_follow_side(SIDE_FOR_SIGN.get(self.decision, FOLLOW_AUTO))
+        self.set_follow_side(self.chosen_side())
+        self.set_avoid(False)
 
     def tick_stopped(self):
         self.set_armed(MISSION_NONE)
         self.set_driving(False)
         self.set_follow_side(FOLLOW_AUTO)
+        self.set_avoid(False)
 
 
 def main(args=None):

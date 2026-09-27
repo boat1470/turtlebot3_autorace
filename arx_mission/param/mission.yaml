@@ -56,6 +56,49 @@
       # view, so it has to cover the whole approach.
       give_up_s: 90.0
 
+      # What the arrow is used for once it has been read.
+      #
+      # false: only to decide which way to turn. The turn puts the robot into
+      # the branch and lane following carries on as it does everywhere else -
+      # whatever lane the robot now points into is the lane it follows.
+      #
+      # true also pins detect_lane to that side's line for the rest of the
+      # run. Measured on this course that steers by `line + 280`, and 280 is
+      # half a lane width, so it aims at the middle of the lane rather than
+      # at the line: a 0.41 m turning radius needing 0.64 m of travel to come
+      # round 90 degrees, which the junction does not give it.
+      follow_chosen_line: true
+
+      turn:
+        # How far to turn once the arrow is known, per side. Positive is
+        # counter-clockwise, so a left arrow is positive and a right one
+        # negative. Two separate numbers because the junction is not
+        # symmetric.
+        #
+        # A fixed amount of rotation, not a heading to reach and not "turn
+        # until the line looks right". Both were tried. Aiming at a heading
+        # needs the one the robot set off with, which is only right while
+        # this node has been up since the start. Waiting on the lane detector
+        # cannot tell a line that is merely visible from one that is usable:
+        # it handed over while the yellow fit still sat in the middle of the
+        # frame, `line + 280` put the steering target at 714 of 1000, and the
+        # robot turned right into the wrong branch while reporting
+        # lane_state 1 the whole way.
+        enabled: true
+        left_deg: 0.0
+        right_deg: 0.0
+
+        rate: 0.4            # rad/s
+        speed: 0.0           # m/s while turning; 0 turns on the spot
+        # Ease in over the last stretch so a tick cannot overshoot by much -
+        # 0.4 rad/s at 10 Hz is 2.3 deg a tick. Capped at half the turn, so a
+        # 5 degree turn is not spent entirely crawling.
+        slow_within_deg: 10.0
+
+        # Only a backstop now the turn has a definite size: it catches
+        # odometry that never arrives.
+        give_up_s: 20.0
+
       heading:
         # Absolute heading, straight off /odom. Measured on a running stack,
         # /odom's yaw is the same number gz reports for the world - only its
