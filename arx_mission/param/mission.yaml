@@ -136,7 +136,10 @@
       # Ladder if this is not right: 0.004 / 0.006 / 0.008. Stop at the
       # value that starts weaving on the straights - and if it weaves,
       # lower kd rather than putting kp back.
-      kp: 0.006
+      # Scaled with the speed: turning radius is v / (kp x error), so going
+      # from 0.05 to 0.07 m/s without raising this widens every curve by the
+      # same 1.4x. 0.0087 = 0.006 x (0.07 / 0.05) holds the radius.
+      kp: 0.0087
 
       # A rate, not a raw frame-to-frame difference. /detect/lane arrives at
       # 1.9 Hz here - frames where the lane is lost publish nothing at all -
@@ -153,7 +156,8 @@
       # Most the published angular velocity may change between one lane
       # message and the next. The backstop for smoothness whatever the error
       # does; 0 turns it off.
-      max_angular_step: 0.35
+      # Scaled with the speed, same reason as kp.
+      max_angular_step: 0.49
 
       # The ceiling that actually bites first. linear.x is
       #
@@ -168,11 +172,11 @@
       # /control/max_vel overrides this at run time, which is how the level
       # crossing mission is meant to slow the robot; this is the starting
       # value.
-      max_vel: 0.1
+      max_vel: 0.15
 
     # The original control_lane hard-codes min(..., 0.05) here. Left at the
     # same value so behaviour is unchanged, but it has to be reachable: the
     # course is 16-18 m, which at 0.05 m/s is 320-360 s against a 300 s
     # limit, before any mission stops are counted.
     speed:
-      max: 0.05
+      max: 0.07
