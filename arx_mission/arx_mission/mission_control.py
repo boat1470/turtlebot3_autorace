@@ -63,10 +63,12 @@ NAMES = {LIGHT_UNKNOWN: 'unknown', LIGHT_RED: 'red',
 # are kept even though the fork no longer matches the intersection sign
 # itself, so the numbers on the wire still mean what the example's tooling
 # thinks they mean. 1 is therefore not produced by our detector.
+SIGN_CONSTRUCTION = 1
 SIGN_LEFT = 2
 SIGN_RIGHT = 3
 
-SIGN_NAMES = {SIGN_LEFT: 'left', SIGN_RIGHT: 'right'}
+SIGN_NAMES = {SIGN_CONSTRUCTION: 'construction',
+              SIGN_LEFT: 'left', SIGN_RIGHT: 'right'}
 
 # /arx/follow_side - must match detect_lane.py. Which lane line detect_lane
 # should steer by once the junction has been decided: the yellow one on the
@@ -84,11 +86,13 @@ SIDE_NAMES = {FOLLOW_AUTO: 'auto', FOLLOW_YELLOW: 'yellow', FOLLOW_WHITE: 'white
 MISSION_NONE = 0
 MISSION_TRAFFIC_LIGHT = 1
 MISSION_INTERSECTION = 2
+MISSION_CONSTRUCTION = 3
 
 STAGE_WAIT_GREEN = 'wait_green'
 STAGE_DRIVE_TO_SIGN = 'drive_to_sign'
 STAGE_TURN = 'turn'
 STAGE_FOLLOW_SIDE = 'follow_side'
+STAGE_DRIVE_TO_CONSTRUCTION = 'drive_to_construction'
 
 # /detect/lane_state, from detect_lane: which line it is steering by.
 LANE_STATE_FOR_SIDE = {FOLLOW_YELLOW: 1, FOLLOW_WHITE: 3}
@@ -244,6 +248,25 @@ class MissionControl(Node):
         self.declare_parameter('intersection.heading.center_deg', 180.0)
         self.declare_parameter('intersection.heading.tolerance_deg', 45.0)
 
+        # The construction sign, hunted after the junction is behind us.
+        # Same shape as the intersection block: the stage reads whichever
+        # block sign_prefix() names, so the two cannot be confused.
+        self.declare_parameter('construction.enabled', True)
+        self.declare_parameter('construction.window', 7)
+        self.declare_parameter('construction.confirm_votes', 5)
+        self.declare_parameter('construction.vote_max_age_s', 3.0)
+        # Stop where the sign was found. The debug step: nothing is built on
+        # top of this yet.
+        self.declare_parameter('construction.stop_after_detect', True)
+        self.declare_parameter('construction.give_up_s', 120.0)
+        # The board is turned -90 degrees in the world file like the arrow
+        # is, so its broad faces are normal to the world x axis and it can
+        # only be read while the robot looks along x. 0 is looking towards
+        # +x.
+        self.declare_parameter('construction.heading.enabled', True)
+        self.declare_parameter('construction.heading.center_deg', 0.0)
+        self.declare_parameter('construction.heading.tolerance_deg', 45.0)
+
         self.declare_parameter('rate_hz', 10.0)
 
         self.stage = STAGE_WAIT_GREEN
@@ -285,6 +308,11 @@ class MissionControl(Node):
         # Which way the course goes, once it has been confirmed. Set once and
         # never revisited - see on_sign.
         self.decision = None
+        # Set once the construction sign has been read. From then on the
+        # steering goes back to the mean of both lines: the branch the arrow
+        # picked is long behind, and there is nothing left to hug a single
+        # line for. Not on entering the stage - on reading the sign.
+        self.construction_seen = False
 
         self.pub_armed = self.create_publisher(UInt8, '/arx/armed_mission', 1)
         # Republished every tick. Idempotent, and it means a control_lane
@@ -346,9 +374,10 @@ class MissionControl(Node):
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y * q.y + q.z * q.z)))
 
-    def heading_ok(self):
-        """Whether the robot is pointing a way the board can be seen from."""
-        if not self.get_parameter('intersection.heading.enabled').value:
+    def heading_ok(self, prefix=None):
+        """Whether the robot is pointing a way this mission's board can be seen from."""
+        prefix = prefix or self.sign_prefix()
+        if not self.get_parameter(f'{prefix}.heading.enabled').value:
             return True
         if self.yaw is None:
             # No odometry. Accepting is the lesser evil: a gate that cannot
@@ -358,10 +387,10 @@ class MissionControl(Node):
                 'heading gate is on but no /odom has arrived - accepting the sign anyway',
                 once=True)
             return True
-        want = self.get_parameter('intersection.heading.center_deg').value
-        tol = self.get_parameter('intersection.heading.tolerance_deg').value
-        # Shortest angular distance, so a window straddling +/-180 - which
-        # the default one does - works like any other.
+        want = self.get_parameter(f'{prefix}.heading.center_deg').value
+        tol = self.get_parameter(f'{prefix}.heading.tolerance_deg').value
+        # Shortest angular distance, so a window straddling +/-180 works like
+        # any other.
         return abs((self.yaw - want + 180.0) % 360.0 - 180.0) <= tol
 
     def on_sign(self, msg):
@@ -388,21 +417,41 @@ class MissionControl(Node):
             return
         self.sign_votes.append((self.now(), msg.data))
 
+    def sign_prefix(self):
+        """Which parameter block governs the sign hunt in this stage."""
+        return ('construction' if self.stage == STAGE_DRIVE_TO_CONSTRUCTION
+                else 'intersection')
+
+    def reset_votes(self):
+        """Start a fresh hunt: the last mission's reports are not evidence."""
+        self.sign_votes.clear()
+        self.sign_msgs = 0
+        self.sign_rejected = 0
+        self.heading_was_ok = None
+
     def fresh_votes(self):
         """The reports still young enough to count."""
-        cutoff = self.now() - self.get_parameter('intersection.vote_max_age_s').value
+        cutoff = self.now() - self.get_parameter(
+            f'{self.sign_prefix()}.vote_max_age_s').value
         return [v for t, v in self.sign_votes if t >= cutoff]
 
-    def sign_majority(self):
-        """The value with enough votes in the window, or (None, count)."""
-        need = self.get_parameter('intersection.confirm_votes').value
+    def sign_majority(self, wanted=None):
+        """The value with enough votes in the window, or (None, count).
+
+        `wanted` is the set of numbers this stage is listening for. Only one
+        detector is armed at a time and the numbers do not overlap, so one
+        vote buffer serves every mission - but a stage should not be able to
+        act on a report meant for a different one.
+        """
+        wanted = wanted if wanted is not None else set(SIGN_NAMES)
+        need = self.get_parameter(f'{self.sign_prefix()}.confirm_votes').value
         votes = self.fresh_votes()
         best, count = None, 0
         for value in set(votes):
             c = votes.count(value)
             if c > count:
                 best, count = value, c
-        if best in SIGN_NAMES and count >= need:
+        if best in wanted and count >= need:
             return best, count
         return None, count
 
@@ -464,6 +513,8 @@ class MissionControl(Node):
             self.tick_turn(now)
         elif self.stage == STAGE_FOLLOW_SIDE:
             self.tick_follow_side()
+        elif self.stage == STAGE_DRIVE_TO_CONSTRUCTION:
+            self.tick_drive_to_construction(now)
         else:
             self.tick_stopped()
 
@@ -533,9 +584,9 @@ class MissionControl(Node):
                 self.go(STAGE_TURN,
                         f'sign {name} - turning {self.turn_target():+.0f} deg')
             else:
-                self.go(STAGE_FOLLOW_SIDE,
-                        f'sign {name} - steering by the '
-                        f'{SIDE_NAMES[SIDE_FOR_SIGN[winner]]} line from here')
+                self.after_junction(
+                    f'sign {name} - steering by the '
+                    f'{SIDE_NAMES[SIDE_FOR_SIGN[winner]]} line from here')
             return
 
         waited = now - self.stage_since
@@ -562,7 +613,7 @@ class MissionControl(Node):
             # failed, and stopping here loses every mission after this one as
             # well as this one. Steering stays on the mean of both lines,
             # which is what the robot was already doing.
-            self.go(STAGE_FOLLOW_SIDE, 'gave up on the sign - carrying on')
+            self.after_junction('gave up on the sign - carrying on')
 
     def accumulate_turn(self):
         """Add this tick's rotation to the running total."""
@@ -642,22 +693,64 @@ class MissionControl(Node):
         # rotation it was given on the tick before avoid_active went false.
         self.set_avoid(True, angular=0.0, linear=0.0)
         self.set_avoid(False)
-        self.go(STAGE_FOLLOW_SIDE,
-                f'{why} after turning {turned:+.0f} deg'
-                if turned is not None else why)
+        self.after_junction(f'{why} after turning {turned:+.0f} deg'
+                            if turned is not None else why)
 
     def chosen_side(self):
         """The line to steer by, or auto when the arrow only picked a turn."""
+        if self.construction_seen:
+            return FOLLOW_AUTO
         if not self.get_parameter('intersection.follow_chosen_line').value:
             return FOLLOW_AUTO
         return SIDE_FOR_SIGN.get(self.decision, FOLLOW_AUTO)
 
+    def after_junction(self, why):
+        """Where the wheel goes once the junction is behind us."""
+        if self.get_parameter('construction.enabled').value:
+            self.reset_votes()
+            self.go(STAGE_DRIVE_TO_CONSTRUCTION, why)
+        else:
+            self.go(STAGE_FOLLOW_SIDE, why)
+
     def tick_follow_side(self):
-        """Drive on, steering by whichever line the junction chose."""
+        """Just drive. Nothing is being looked for."""
         self.set_armed(MISSION_NONE)
         self.set_driving(True)
         self.set_follow_side(self.chosen_side())
         self.set_avoid(False)
+
+    def tick_drive_to_construction(self, now):
+        """Carry on down the course until the construction sign is read."""
+        self.set_driving(True)
+        self.set_avoid(False)
+        # Still steering by whatever the junction chose. Going back to both
+        # lines happens when the sign is read, not on the way to it.
+        self.set_follow_side(self.chosen_side())
+        self.set_armed(MISSION_CONSTRUCTION)
+
+        winner, votes = self.sign_majority({SIGN_CONSTRUCTION})
+        if winner is not None:
+            # Here is where the steering goes back to both lines.
+            self.construction_seen = True
+            self.set_follow_side(FOLLOW_AUTO)
+            self.get_logger().info(
+                f'construction sign confirmed: {votes} of the last '
+                f'{len(self.fresh_votes())} reports '
+                f'({self.sign_msgs} seen, {self.sign_rejected} ignored on heading)')
+            if self.get_parameter('construction.stop_after_detect').value:
+                self.stop('construction sign - stopping here, as asked')
+            return
+
+        waited = now - self.stage_since
+        if waited > self.get_parameter('construction.give_up_s').value:
+            recent = [SIGN_NAMES.get(v, v) for v in self.fresh_votes()]
+            yaw = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+            self.get_logger().warn(
+                f'no construction sign after {waited:.0f} s '
+                f'({self.sign_msgs} reports, {self.sign_rejected} dropped on '
+                f'heading, facing {yaw}, last {len(recent)}: {recent}) '
+                f'- carrying on')
+            self.go(STAGE_FOLLOW_SIDE, 'gave up on the construction sign')
 
     def tick_stopped(self):
         self.set_armed(MISSION_NONE)

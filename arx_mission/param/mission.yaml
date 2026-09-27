@@ -123,6 +123,39 @@
         center_deg: 180.0
         tolerance_deg: 45.0
 
+    # --- mission 3, the construction sign ------------------------------
+    # Same shape as the intersection block; the stage reads whichever of the
+    # two its own name selects, so a report meant for one cannot be acted on
+    # by the other. The numbers do not overlap either - construction
+    # publishes 1, the arrows 2 and 3.
+    construction:
+      enabled: true
+      window: 7
+      confirm_votes: 5
+      vote_max_age_s: 3.0
+
+      # Stop where the sign was found. The debug step asked for while the
+      # detection is being trusted; nothing is built on top of it yet.
+      stop_after_detect: true
+
+      # Measured from the moment the junction is behind us, and the board is
+      # most of the way round the course from there.
+      give_up_s: 120.0
+
+      heading:
+        # The board is turned -90 degrees in the world file, exactly like the
+        # arrow, so its broad faces are normal to the world x axis and it can
+        # only be read while the robot is looking along x. 0 is looking
+        # towards +x.
+        #
+        # Measured: from 0.22 to 0.45 m and from either side it matches with
+        # 10 to 33 RANSAC inliers - far more strongly than the arrows, which
+        # manage 4 to 17. A bold red triangle on white gives SIFT more to
+        # work with than a thin white glyph on navy.
+        enabled: true
+        center_deg: 0.0
+        tolerance_deg: 45.0
+
     # --- lane following (arx_control_lane) ------------------------------
     control:
       # Raised from the example's 0.0025. At that gain the robot had to be
