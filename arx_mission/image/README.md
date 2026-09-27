@@ -50,3 +50,22 @@ practice day, from the robot's own camera, the same way:
 then crop the board out of a frame where it is 40-70 px across.
 `sign.image_dir` selects which set the detector loads, so both can live side
 by side.
+
+## construction.png
+
+Cut the same way, from 0.28 m west of the board. It matches far more
+strongly than the arrows do - 10 to 33 inliers at every distance from 0.22
+to 0.45 m and from either side, against the arrows' 4 to 17 - because it is
+a bold red triangle on white rather than a thin white glyph on navy.
+
+Cross-checked the same way, grading each candidate on the frames it was not
+cut from:
+
+  cut from     total inliers on the other five frames
+  west 0.28 m                                      95
+  east 0.28 m                                      88
+  east 0.22 m                                      86
+  west 0.35 m                                      66
+
+The board is textured identically on both broad faces, so east and west
+views are the same size at the same distance and either will do.

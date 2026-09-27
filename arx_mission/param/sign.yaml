@@ -4,6 +4,31 @@
 /**:
   ros__parameters:
     sign:
+      # Which signs this node looks for. Each one names the mission that has
+      # to be armed before it is considered, the number it publishes on
+      # /detect/traffic_sign, and the file to match against.
+      #
+      # Signs sharing a mission are alternatives: the best scoring one wins
+      # and the rest are dropped, which is what stops a frame that matches
+      # both arrows from publishing both.
+      #
+      # The values keep the numbers the example's own Enum produced
+      # (construction 1, left 2, right 3) so its tooling still reads them.
+      names: [left, right, construction]
+
+      left:
+        mission: 2
+        value: 2
+        image: left.png
+      right:
+        mission: 2
+        value: 3
+        image: right.png
+      construction:
+        mission: 3
+        value: 1
+        image: construction.png
+
       # Good matches a reference image needs before it is considered at all.
       # The original wrote `len(good) > MIN_MATCH_COUNT` with MIN_MATCH_COUNT
       # set to 5, so its real threshold was six; this is that number, spelt

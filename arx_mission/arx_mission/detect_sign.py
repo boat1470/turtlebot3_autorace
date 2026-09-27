@@ -17,27 +17,41 @@
 #
 # Author: Leon Jung, Gilbert, Ashe Kim, Jun
 #
-# ARX: forked from turtlebot3_autorace_detect/detect_intersection_sign.py.
-# Same file name, same class, same method names, same variable names, so a
-# diff against the original shows only what changed. Every change is marked
-# # ARX. Six of them:
+# ARX: grew out of a fork of
+# turtlebot3_autorace_detect/detect_intersection_sign.py, and no longer
+# keeps its shape, so the name changed with it.
 #
-#   1. The intersection sign is gone. Only left and right are matched.
-#   2. An armed gate on /arx/armed_mission.
-#   3. Left and right are now mutually exclusive - one publish per frame.
-#   4. findHomography returning None, and frames with no features, no longer
-#      kill the node.
-#   5. MIN_MATCH_COUNT and MIN_MSE_DECISION are parameters.
-#   6. frame_skip and publish_debug_image are parameters.
+# The example ships five sign detectors - intersection, construction,
+# parking, level_crossing, tunnel - and they are the same file five times
+# over. Only four things differ between them: which reference images to
+# load, what number to publish, how many matches to insist on, and the class
+# name. Forking each one in turn would have meant five near-identical copies
+# to keep in step.
 #
-# Why the intersection sign went: it has 67 descriptors against left's 32 and
-# right's 56, so it was both the slowest of the three to match and the most
-# willing to match something that was not it. Nothing downstream ever needed
-# it - the question this mission asks is which way to turn - and dropping it
-# takes a third off the matching work on every frame, which is the most
-# expensive thing this stack does on a Raspberry Pi 4.
+# This is one node that reads that list from parameters instead. Adding the
+# parking sign is a yaml entry, not a file.
+#
+# What it keeps from the fork:
+#
+#   1. An armed gate on /arx/armed_mission. Which signs are even considered
+#      depends on which mission is running, so the node does no work at all
+#      between missions - SIFT over a whole frame is the most expensive
+#      thing in this stack and there is a Raspberry Pi 4 to share.
+#   2. One publish per frame. The example tested each sign in its own `if`,
+#      so a frame matching two published both, and anything keeping the
+#      latest value read the second one - which for the arrows meant reading
+#      "right" every time both matched.
+#   3. Scores normalised by the reference's descriptor count, because
+#      comparing raw match counts between a 32-descriptor image and a
+#      56-descriptor one leans one way whatever the camera is looking at.
+#   4. Guards for findHomography returning None, frames with no features,
+#      and knnMatch pairs shorter than two - all of which killed the node.
+#   5. A minimum inlier count. A match with no inliers at all is not a
+#      detection: it means the matches were scattered rather than describing
+#      one rigid sign. Without this the junction was called "right" on a
+#      left board three times in a row.
+#   6. Thresholds and the frame skip as parameters.
 
-from enum import Enum
 import os
 
 from ament_index_python.packages import get_package_share_directory
@@ -50,14 +64,27 @@ from sensor_msgs.msg import CompressedImage
 from sensor_msgs.msg import Image
 from std_msgs.msg import UInt8
 
-# ARX: must match mission_control.py.
-MISSION_INTERSECTION = 2
-
 
 class DetectSign(Node):
 
     def __init__(self):
         super().__init__('detect_sign')
+
+        # Which signs exist, and for each one: the mission that has to be
+        # armed before it is looked for, the number to publish when it is
+        # seen, and the file to match against.
+        #
+        #   sign:
+        #     names: [left, right, construction]
+        #     left:
+        #       mission: 2
+        #       value: 2
+        #       image: left.png
+        #
+        # Signs sharing a mission are alternatives - the best scoring one
+        # wins and the others are dropped. That is what stops a frame
+        # matching both arrows from publishing both.
+        self.declare_parameter('sign.names', ['left', 'right'])
 
         # ARX: the original has no parameters at all - the two thresholds are
         # local variables inside the callback and the frame skip is a literal.
@@ -132,11 +159,11 @@ class DetectSign(Node):
         self.create_subscription(UInt8, '/arx/armed_mission', self.cbArmedMission, 1)
 
         self.cvBridge = CvBridge()
-        # ARX: kept exactly as the original wrote it even though
-        # .intersection is now unused, because this line is what makes
-        # left = 2 and right = 3. The values on /detect/traffic_sign are
-        # unchanged, so the example's own tooling still reads them.
-        self.TrafficSign = Enum('TrafficSign', 'intersection left right')
+        # ARX: the example kept the published numbers in
+        # Enum('TrafficSign', 'intersection left right'), which fixed both
+        # the set of signs and their values in code. They are parameters now
+        # - sign.<name>.value - and the defaults keep the numbers the
+        # example used, so its own tooling still reads them.
         self.counter = 1
 
         self.fnPreproc()
@@ -150,34 +177,51 @@ class DetectSign(Node):
         self.armed = msg.data
         self.get_logger().info(f'armed mission -> {self.armed}')
 
-    def fnIsArmed(self):
-        """Whether this frame should be looked at at all (ARX)."""
+    def fnCandidates(self):
+        """The signs worth looking for right now."""
         if self.get_parameter('sign.always_on').value:
-            return True
-        return self.armed == MISSION_INTERSECTION
+            return list(self.signs.values())
+        return [s for s in self.signs.values() if s['mission'] == self.armed]
 
     def fnPreproc(self):
         # Initiate SIFT detector
         self.sift = cv2.SIFT_create()
 
+        # ARX: the reference set comes from parameters. Empty means this
+        # package's own image directory, whose README records why the ones
+        # in turtlebot3_autorace_detect are not used - they score zero
+        # RANSAC inliers against this simulator's boards at every distance
+        # measured.
         dir_path = self.get_parameter('sign.image_dir').value or os.path.join(
-            get_package_share_directory('arx_mission'), 'image')  # ARX
+            get_package_share_directory('arx_mission'), 'image')
 
-        # ARX: intersection.png is no longer loaded.
-        self.img_left = cv2.imread(dir_path + '/left.png', 0)
-        self.img_right = cv2.imread(dir_path + '/right.png', 0)
-        if any(img is None for img in (self.img_left, self.img_right)):
-            raise FileNotFoundError(
-                f'Reference sign image missing under {dir_path}'
-            )
+        self.signs = {}
+        for name in self.get_parameter('sign.names').value:
+            for key, default in (('mission', 0), ('value', 0), ('image', f'{name}.png')):
+                self.declare_parameter(f'sign.{name}.{key}', default)
+            image = self.get_parameter(f'sign.{name}.image').value
+            img = cv2.imread(os.path.join(dir_path, image), 0)
+            if img is None:
+                raise FileNotFoundError(
+                    f'reference image for "{name}" missing: '
+                    f'{os.path.join(dir_path, image)}')
+            kp, des = self.sift.detectAndCompute(img, None)
+            if des is None:
+                raise ValueError(f'no SIFT features in {image}')
+            self.signs[name] = {
+                'name': name,
+                'mission': self.get_parameter(f'sign.{name}.mission').value,
+                'value': self.get_parameter(f'sign.{name}.value').value,
+                'img': img, 'kp': kp, 'des': des,
+            }
+            self.get_logger().info(
+                f'  {name}: {image} {img.shape[1]}x{img.shape[0]} '
+                f'{len(des)} descriptors, publishes '
+                f'{self.signs[name]["value"]} while mission '
+                f'{self.signs[name]["mission"]} is armed')
 
-        self.kp_left, self.des_left = self.sift.detectAndCompute(self.img_left, None)
-        self.kp_right, self.des_right = self.sift.detectAndCompute(self.img_right, None)
-
-        self.get_logger().info(
-            f'references from {dir_path}: left {len(self.des_left)} descriptors, '
-            f'right {len(self.des_right)}'
-        )
+        if not self.signs:
+            raise ValueError('sign.names is empty - nothing to look for')
 
         FLANN_INDEX_KDTREE = 0
         index_params = {
@@ -198,7 +242,7 @@ class DetectSign(Node):
         err = total_sum / num_all
         return err
 
-    def fnMatchSign(self, kp1, des1, kp_ref, des_ref):
+    def fnMatchSign(self, kp1, des1, sign):
         """Match one reference sign and score it (ARX).
 
         Returns None when the sign is not there, otherwise the pieces the
@@ -210,6 +254,7 @@ class DetectSign(Node):
         right.png has 56, so comparing raw counts between them would lean
         towards right on every frame no matter what the camera is looking at.
         """
+        kp_ref, des_ref = sign['kp'], sign['des']
         min_match_count = self.get_parameter('sign.min_match_count').value
         max_mse = self.get_parameter('sign.max_mse').value
 
@@ -248,6 +293,7 @@ class DetectSign(Node):
         if inliers < self.get_parameter('sign.min_inliers').value:
             return None
         return {
+            'sign': sign,
             'good': good,
             'mask': mask.ravel().tolist(),
             'score': inliers / len(des_ref),
@@ -256,8 +302,9 @@ class DetectSign(Node):
         }
 
     def cbFindTrafficSign(self, image_msg):
-        # ARX: an unarmed detector does no work at all.
-        if not self.fnIsArmed():
+        # ARX: with nothing to look for, no work is done at all.
+        candidates = self.fnCandidates()
+        if not candidates:
             return
 
         # drop the frame to 1/5 (6fps) because of the processing speed.
@@ -288,48 +335,31 @@ class DetectSign(Node):
             self.fnPublishImage(cv_image_input)
             return
 
-        match_left = self.fnMatchSign(kp1, des1, self.kp_left, self.des_left)
-        match_right = self.fnMatchSign(kp1, des1, self.kp_right, self.des_right)
+        hits = [m for m in (self.fnMatchSign(kp1, des1, s) for s in candidates)
+                if m is not None]
 
-        # ARX: this is the change that matters most. The original tested left
-        # and right in two independent `if` blocks, so a frame that matched
-        # both published 2 and then 3 back to back - and anything keeping the
-        # latest value read that as "right", every time. Picking one winner
-        # means one publish per frame and no way to be told the wrong way
-        # round by message ordering.
-        if match_left and match_right:
-            self.get_logger().info(
-                f'both arrows matched - left {match_left["score"]:.3f} '
-                f'right {match_right["score"]:.3f}'
-            )
-            best = match_left if match_left['score'] >= match_right['score'] else match_right
-            is_left = best is match_left
-        elif match_left:
-            best, is_left = match_left, True
-        elif match_right:
-            best, is_left = match_right, False
-        else:
+        # ARX: one winner per frame. The example tested each sign in its own
+        # `if` and published every one that matched, so anything keeping the
+        # latest value saw whichever happened to be tested last.
+        if not hits:
             self.fnPublishImage(cv_image_input)
             return
+        if len(hits) > 1:
+            self.get_logger().info(
+                'several signs matched - '
+                + ', '.join(f'{h["sign"]["name"]} {h["score"]:.3f}' for h in hits))
+        best = max(hits, key=lambda h: h['score'])
 
         msg_sign = UInt8()
-        msg_sign.data = (
-            self.TrafficSign.left.value if is_left else self.TrafficSign.right.value
-        )
+        msg_sign.data = int(best['sign']['value'])
         self.pub_traffic_sign.publish(msg_sign)
         self.get_logger().info(
-            f'Detect {"left" if is_left else "right"} sign '
+            f'Detect {best["sign"]["name"]} sign '
             f'({best["inliers"]} inliers, score {best["score"]:.3f}, '
-            f'mse {best["mse"]:.0f})'
-        )
+            f'mse {best["mse"]:.0f})')
 
-        self.fnPublishImage(
-            cv_image_input,
-            kp1,
-            best,
-            self.img_left if is_left else self.img_right,
-            self.kp_left if is_left else self.kp_right,
-        )
+        self.fnPublishImage(cv_image_input, kp1, best,
+                            best['sign']['img'], best['sign']['kp'])
 
     def fnPublishImage(self, cv_image_input, kp1=None, match=None, img_ref=None, kp_ref=None):
         """Publish the debug image, with the matches drawn on if there are any (ARX).

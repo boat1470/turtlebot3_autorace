@@ -48,8 +48,8 @@ def generate_launch_description():
 
     detect_sign_node = Node(
         package='arx_mission',
-        executable='detect_intersection_sign',
-        name='arx_detect_intersection_sign',
+        executable='detect_sign',
+        name='arx_detect_sign',
         output='screen',
         parameters=[
             param_file,
