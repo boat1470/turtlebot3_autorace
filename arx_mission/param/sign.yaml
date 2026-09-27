@@ -60,10 +60,29 @@
       min_inliers: 4
 
       # SIFT over the whole frame is the most expensive thing in this stack,
-      # so unlike the traffic light this one keeps the original's 2-in-3
-      # drop. Confirmation costs 3 frames either way; what matters is that
-      # the robot is still moving while it confirms.
-      frame_skip: 3
+      # which is why this started at the original's 2-in-3 drop. Measured on
+      # the construction board, that drop is what stopped the mission
+      # confirming - not the matching, which worked:
+      #
+      #   Detect construction sign (4 inliers, score 0.027, mse 32619)
+      #   Detect construction sign (5 inliers, score 0.033, mse 16180)   +0.72 s
+      #   Detect construction sign (5 inliers, score 0.033, mse 25233)   +4.20 s
+      #
+      # confirm_votes 5 within vote_max_age_s 3.0 is 1.67 reports a second.
+      # The camera runs at 8.4 Hz, so at 3 the detector only looks at 2.8
+      # frames a second and 60% of them would have to match. 3 reports in
+      # 4.2 s is a 25% hit rate, so the third report arrived with the first
+      # two already expired and the count never climbed above 2.
+      #
+      # At 1 the same 25% gives 2.1 reports a second, which clears 1.67.
+      # Raising the hit rate is the honest fix here; relaxing confirm_votes
+      # would have confirmed on weaker evidence instead.
+      #
+      # This is the same change lane.frame_skip took, for the same reason.
+      # Only measured in simulation. On a Pi 4 this is SIFT on every frame
+      # and has to be timed before it is trusted - it is bounded by the
+      # arming gate, which keeps the detector idle outside its own mission.
+      frame_skip: 1
       publish_debug_image: true
       always_on: false
 
