@@ -44,11 +44,17 @@ def generate_launch_description():
         get_package_share_directory('arx_mission'), 'param', 'mission.yaml')
 
     use_sim_time = LaunchConfiguration('use_sim_time')
+    start_stage = LaunchConfiguration('start_stage')
 
     args = [
         DeclareLaunchArgument(
             'use_sim_time', default_value='true',
             description='Follow /clock. Both give-up timers are measured on this.'),
+        DeclareLaunchArgument(
+            'start_stage', default_value='wait_green',
+            description='Stage to begin in. Anything but wait_green skips the '
+                        'missions before it. full.launch.py start:=<preset> '
+                        'sets this together with where the robot is standing.'),
     ]
 
     mission_control = Node(
@@ -62,6 +68,11 @@ def generate_launch_description():
             # reaches a bool parameter as True or as a type error depends on
             # the launch_ros version, so the type is stated.
             {'use_sim_time': ParameterValue(use_sim_time, value_type=bool)},
+            # After param_file, so it wins. mission.yaml deliberately does not
+            # carry start_stage: a run that skips missions is decided on the
+            # command line for one run, not left set in a file where the next
+            # person inherits it without knowing.
+            {'start_stage': ParameterValue(start_stage, value_type=str)},
         ],
     )
 

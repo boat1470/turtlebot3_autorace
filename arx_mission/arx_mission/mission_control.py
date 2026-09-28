@@ -98,6 +98,18 @@ STAGE_DRIVE_TO_CONSTRUCTION = 'drive_to_construction'
 LANE_STATE_FOR_SIDE = {FOLLOW_YELLOW: 1, FOLLOW_WHITE: 3}
 STAGE_STOPPED = 'stopped'
 
+# Every stage `start_stage` will accept (ARX). Written out rather than
+# collected from the constants above so that adding a stage without deciding
+# whether a run may start in it is a deliberate act.
+STAGES = frozenset({
+    STAGE_WAIT_GREEN,
+    STAGE_DRIVE_TO_SIGN,
+    STAGE_TURN,
+    STAGE_FOLLOW_SIDE,
+    STAGE_DRIVE_TO_CONSTRUCTION,
+    STAGE_STOPPED,
+})
+
 
 class MissionControl(Node):
 
@@ -269,7 +281,35 @@ class MissionControl(Node):
 
         self.declare_parameter('rate_hz', 10.0)
 
-        self.stage = STAGE_WAIT_GREEN
+        # Which stage a run begins in (ARX). The default is the whole course
+        # from the start line; anything else skips the missions before it and
+        # is for testing one mission without driving to it first, which took
+        # minutes per attempt.
+        #
+        # Only the stage is set. Whatever state the skipped stages would have
+        # left behind is not, so a stage started cold has to stand on its own
+        # - drive_to_construction does, because `decision` being None makes
+        # chosen_side() fall back to the mean of both lines, which is what a
+        # run that never read an arrow should steer by anyway.
+        #
+        # The robot still has to be standing somewhere that stage makes sense
+        # from. full.launch.py's `start` argument sets the two together.
+        self.declare_parameter('start_stage', STAGE_WAIT_GREEN)
+
+        self.stage = self.get_parameter('start_stage').value
+        if self.stage not in STAGES:
+            # Loudly, and carry on from the start. An unknown stage reaches
+            # tick()'s else branch, which is tick_stopped: the robot would sit
+            # there not moving and nothing would say why.
+            self.get_logger().error(
+                f'start_stage {self.stage!r} is not a stage - '
+                f'starting at {STAGE_WAIT_GREEN}. '
+                f'Known: {", ".join(sorted(STAGES))}')
+            self.stage = STAGE_WAIT_GREEN
+        if self.stage != STAGE_WAIT_GREEN:
+            self.get_logger().warn(
+                f'starting at stage {self.stage} - the missions before it are '
+                f'skipped, so this is a test run, not a scoring one')
         self.stage_since = None
         self.light = LIGHT_UNKNOWN
         self.green_frames = 0
