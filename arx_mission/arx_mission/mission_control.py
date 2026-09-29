@@ -94,9 +94,12 @@ STAGE_TURN = 'turn'
 STAGE_FOLLOW_SIDE = 'follow_side'
 STAGE_DRIVE_TO_CONSTRUCTION = 'drive_to_construction'
 STAGE_AVOID_CONSTRUCTION = 'avoid_construction'
+STAGE_EDGE_PAST_BOARD = 'edge_past_board'
 
 # /detect/lane_state, from detect_lane: which line it is steering by.
 LANE_STATE_FOR_SIDE = {FOLLOW_YELLOW: 1, FOLLOW_WHITE: 3}
+# Both lines in view. detect_lane publishes 0 for neither.
+LANE_STATE_BOTH = 2
 STAGE_STOPPED = 'stopped'
 
 # Every stage `start_stage` will accept (ARX). Written out rather than
@@ -109,6 +112,7 @@ STAGES = frozenset({
     STAGE_FOLLOW_SIDE,
     STAGE_DRIVE_TO_CONSTRUCTION,
     STAGE_AVOID_CONSTRUCTION,
+    STAGE_EDGE_PAST_BOARD,
     STAGE_STOPPED,
 })
 
@@ -308,6 +312,86 @@ class MissionControl(Node):
         # looks exactly like a clear corridor from here.
         self.declare_parameter('construction.avoid.give_up_s', 60.0)
 
+        # Swinging round a board that blocks the line being hugged.
+        #
+        # An arc out to `swing_deg` off the corridor and a mirrored arc back.
+        # Two arcs of radius r through the same angle move the robot 2r
+        # sideways and 2r forward, so one number sets both, and r = 0.10
+        # gives the 0.19 m of sideways the measured gap beside barrier_2
+        # needs, inside the 0.31 m of corridor before it.
+        #
+        # Closed on yaw rather than on the LiDAR: a board 0.25 m across
+        # leaves only 0.11 m of surface to follow once the robot's own width
+        # is taken off, which is not enough for a distance controller to
+        # settle in. Yaw against the heading the robot had while still lane
+        # following says the same thing the white line going from upright to
+        # flat in the camera would say, and detect_lane cannot say it -
+        # it fits x as a function of y from the bottom of the frame up,
+        # which a flat line is not.
+        self.declare_parameter('construction.avoid.edge.enabled', True)
+        self.declare_parameter('construction.avoid.edge.radius_m', 0.12)
+        # Swing round the next board straight after the first, without going
+        # back to hugging a line in between. Measured on the run that
+        # threaded all three boards: the closest approach to barrier_3 was
+        # zero - a touch - and it happened at yaw 15 degrees, which is to say
+        # the robot was still crossing when it arrived. The delay was going
+        # back to the yellow line, letting control_lane settle on it, and
+        # then waiting for the LiDAR to see the next board at 0.25 m, all
+        # inside the 0.36 m gap between the two boards.
+        self.declare_parameter('construction.avoid.edge.double_swerve', True)
+        self.declare_parameter('construction.avoid.edge.second_radius_m', 0.10)
+        # Straight run between the two swings. Not optional: coming straight
+        # back carries the robot into the board's own x range while it is
+        # still alongside its 0.10 m depth, which the simulation hits at any
+        # gap under 0.30 m for the old radius.
+        self.declare_parameter('construction.avoid.edge.between_m', 0.20)
+        # A straight run at the far end of the second swing, while the robot
+        # is across the corridor and pointing at the side it came from. Every
+        # centimetre here is a centimetre back towards that side, bought
+        # without turning any further - which is what the boards leave no
+        # room for.
+        self.declare_parameter('construction.avoid.edge.cross_m', 0.10)
+        # Straight run right after the on-the-spot turn, while the robot
+        # is pointing across the corridor. This is where the sideways
+        # move comes from when the turn itself made none.
+        self.declare_parameter('construction.avoid.edge.out_m', 0.10)
+        # Turn on the spot instead of arcing round.
+        #
+        # An arc goes forward while it turns, which spends the gap in front
+        # of the board getting closer to it, and swings the outside of the
+        # robot wide - measured at 72 to 323 mm past the yellow line
+        # depending on the radius, in a corridor only 0.485 m across.
+        # Turning on the spot spends neither: the sideways move becomes the
+        # straight run between the two turns and nothing else, so it is one
+        # number and it is exact.
+        #
+        # linear.x is zero while turning, which is not the same as the robot
+        # having stopped - 90 degrees at this rate takes under two seconds,
+        # against the 30 the rules allow before a run is ended.
+        self.declare_parameter('construction.avoid.edge.in_place', True)
+        self.declare_parameter('construction.avoid.edge.in_place_rate', 0.6)
+        # Only for the first board in the zone. That is the one the robot
+        # arrives at square and at speed, with the least room to spare -
+        # measured at 13.4 mm with an arc against 35.3 turning on the spot.
+        # After it the robot is already threading and an arc is quicker,
+        # which matters against a 300 second limit.
+        self.declare_parameter('construction.avoid.edge.in_place_first_only', True)
+        self.declare_parameter('construction.avoid.edge.speed', 0.04)
+        self.declare_parameter('construction.avoid.edge.swing_deg', 90.0)
+        # There is no tolerance parameter for the end of a swing back. It
+        # finishes when the heading crosses the one it started from, which
+        # is a sign change and cannot be stepped over.
+        #
+        # It used to finish when the heading came within settle_deg, and
+        # that is a window 2 x settle_deg wide that the robot has to land a
+        # tick inside. It turns 1.9 degrees a tick at radius 0.12 and 3.4
+        # turning on the spot, so the window is only a few steps across;
+        # miss it and the command does not change, the robot keeps turning
+        # the same way, and it can never come back. A run ended that way
+        # with turned stuck at -20 degrees against a 12 degree window - past
+        # the heading it was aiming for, still turning away from it.
+        self.declare_parameter('construction.avoid.edge.give_up_s', 25.0)
+
         self.declare_parameter('rate_hz', 10.0)
 
         # Which stage a run begins in (ARX). The default is the whole course
@@ -385,6 +469,26 @@ class MissionControl(Node):
         # Latest report from detect_obstacle. None until one arrives, which
         # is not the same as a clear corridor and is treated differently.
         self.blocked = None
+        # The line being hugged through the construction zone. White first:
+        # the first board blocks the left half of the corridor.
+        self.hug_side = FOLLOW_WHITE
+        # Set while swinging round a board.
+        self.edge_dir = 0
+        # 0 arc out, 1 arc back, 2 straight, 3 arc out the other way,
+        # 4 straight across, 5 arc back. Phases 2-5 only run with
+        # double_swerve.
+        self.edge_phase = 0
+        self.edge_mark = None
+        self.edge_mark_turn = 0.0
+        # Boards got round since entering the zone. The first one is the
+        # tight one, so it is the one that gets the slower, surer move.
+        self.edge_count = 0
+        # Set once a double swing has taken the robot round both boards.
+        # The steering stays on the line it came back to; the flag only
+        # says the threading part is behind us.
+        self.zone_done = False
+        self.corridor_yaw = None
+        self.pos = None
 
         self.pub_armed = self.create_publisher(UInt8, '/arx/armed_mission', 1)
         # Republished every tick. Idempotent, and it means a control_lane
@@ -441,11 +545,17 @@ class MissionControl(Node):
                 f'({NAMES.get(msg.data, msg.data)}) - a green may now be acted on')
 
     def on_odom(self, msg):
-        """Track the robot's heading, in degrees, -180 to 180."""
+        """Track the robot's heading, in degrees, -180 to 180, and where it is."""
         q = msg.pose.pose.orientation
         self.yaw = math.degrees(math.atan2(
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y * q.y + q.z * q.z)))
+        # Position is only ever used as a difference over a few tens of
+        # centimetres, which is what odometry from wheels is good at: over a
+        # whole course it came out 2.5 cm from where the simulator said the
+        # robot was. It is in the odom frame, whose origin is wherever the
+        # robot started, so the absolute numbers mean nothing.
+        self.pos = (msg.pose.pose.position.x, msg.pose.pose.position.y)
 
     def on_obstacle(self, msg):
         """Which half of the corridor ahead detect_obstacle says is blocked."""
@@ -496,8 +606,9 @@ class MissionControl(Node):
 
     def sign_prefix(self):
         """Which parameter block governs the sign hunt in this stage."""
-        return ('construction' if self.stage == STAGE_DRIVE_TO_CONSTRUCTION
-                else 'intersection')
+        if self.stage == STAGE_DRIVE_TO_CONSTRUCTION:
+            return 'construction'
+        return 'intersection'
 
     def reset_votes(self):
         """Start a fresh hunt: the last mission's reports are not evidence."""
@@ -594,6 +705,8 @@ class MissionControl(Node):
             self.tick_drive_to_construction(now)
         elif self.stage == STAGE_AVOID_CONSTRUCTION:
             self.tick_avoid_construction(now)
+        elif self.stage == STAGE_EDGE_PAST_BOARD:
+            self.tick_edge_past_board(now)
         else:
             self.tick_stopped()
 
@@ -819,6 +932,8 @@ class MissionControl(Node):
             if self.get_parameter('construction.stop_after_detect').value:
                 self.stop('construction sign - stopping here, as asked')
             elif self.get_parameter('construction.avoid.enabled').value:
+                self.edge_count = 0
+                self.zone_done = False
                 self.go(STAGE_AVOID_CONSTRUCTION,
                         'construction sign - threading the boards')
             else:
@@ -853,17 +968,22 @@ class MissionControl(Node):
         self.set_driving(True)
         self.set_avoid(False)
         self.set_armed(MISSION_CONSTRUCTION)
-        # White first: the first board blocks the left half, so the right
-        # half is the one to be in.
-        side = FOLLOW_WHITE
+        side = self.hug_side
         self.set_follow_side(side)
 
-        if (self.blocked is not None
-                and self.blocked & BLOCKED_AHEAD
-                and self.get_parameter(
-                    'construction.avoid.stop_at_obstacle').value):
-            self.stop(f'board across the {SIDE_NAMES[side]} line - '
-                      f'stopping here, as asked')
+        if self.blocked is not None and self.blocked & BLOCKED_AHEAD:
+            if self.get_parameter(
+                    'construction.avoid.stop_at_obstacle').value:
+                self.stop(f'board across the {SIDE_NAMES[side]} line - '
+                          f'stopping here, as asked')
+                return
+            if self.get_parameter('construction.avoid.edge.enabled').value:
+                self.start_edge(now)
+                return
+
+        if self.zone_done:
+            # Both boards are behind us.
+            self.go(STAGE_FOLLOW_SIDE, 'boards done')
             return
 
         waited = now - self.stage_since
@@ -877,6 +997,216 @@ class MissionControl(Node):
                 f'still in the construction zone after {waited:.0f} s '
                 f'({seen}) - carrying on')
             self.go(STAGE_FOLLOW_SIDE, 'gave up threading the boards')
+
+    def start_edge(self, now):
+        """Begin swinging round a board, if there is anywhere to swing to."""
+        # Away from the line being hugged. The board blocks the half the
+        # robot is in, so the other half is where it has to go, and the line
+        # it was steering by is what says which half that was.
+        #
+        # Not from the LiDAR, which was the first version and sent the robot
+        # out of the corridor twice. Two things defeat it. The board reaches
+        # across most of its own half, so from the white line the nearer end
+        # of it sits in the left window and reads as "left blocked" while the
+        # gap it leaves is further left than the window sees. And the edge of
+        # the corridor is paint, so the right window past the white line
+        # reads clear - open ground, as far as a laser is concerned.
+        self.edge_dir = +1 if self.hug_side == FOLLOW_WHITE else -1
+        # The heading to come back to. Taken now, while lane following still
+        # has the robot square to the corridor.
+        self.corridor_yaw = self.yaw
+        self.turn_start_yaw = self.yaw
+        self.turn_last_yaw = self.yaw
+        self.turn_accum = 0.0
+        self.edge_phase = 0
+        self.edge_mark = None
+        self.edge_mark_turn = 0.0
+        self.edge_count += 1
+        way = 'left' if self.edge_dir > 0 else 'right'
+        spot = self.edge_on_spot()
+        self.go(STAGE_EDGE_PAST_BOARD,
+                f'board {self.edge_count} across the '
+                f'{SIDE_NAMES[self.hug_side]} line - going {way} round it '
+                f'{"on the spot" if spot else "on an arc"}')
+
+    def tick_edge_past_board(self, now):
+        """Get round a board, and round the one after it.
+
+        Seven phases. The first swing turns on the spot and then drives
+        straight; every swing after it is an arc, which is quicker.
+
+        Turning on the spot for the first one is not symmetry for its own
+        sake. That board is the one the robot arrives at square and at speed
+        with the least room to spare, and an arc spends the gap in front of
+        it turning towards it - measured at 13.4 mm of clearance against
+        35.3 mm on the spot. An arc also throws the outside of the robot
+        wide, which in a corridor 0.485 m across put it 72 to 323 mm past the
+        yellow line depending on the radius. Turning on the spot sweeps only
+        the robot's own 0.112 m.
+
+        linear.x is zero while turning on the spot, which is not the robot
+        having stopped: 90 degrees at this rate takes under two seconds,
+        against the 30 the rules allow before a run is ended.
+
+        The swings are closed on yaw against the heading lane following had,
+        which is the same fact as the white line lying flat in the camera
+        rather than standing upright - the cue this was asked for.
+        detect_lane cannot report it: its sliding windows walk up from the
+        bottom of the frame fitting x as a function of y, and a flat line is
+        not a function of y. It goes quiet instead, which looks exactly like
+        losing the line for any other reason.
+        """
+        self.set_driving(True)
+        self.set_armed(MISSION_CONSTRUCTION)
+        self.accumulate_turn()
+
+        g = self.get_parameter
+        speed = g('construction.avoid.edge.speed').value
+        swing = g('construction.avoid.edge.swing_deg').value
+        double = g('construction.avoid.edge.double_swerve').value
+        first_r = g('construction.avoid.edge.radius_m').value
+        second_r = g('construction.avoid.edge.second_radius_m').value
+        between = g('construction.avoid.edge.between_m').value
+        across = g('construction.avoid.edge.cross_m').value
+        out = g('construction.avoid.edge.out_m').value
+        spot_rate = g('construction.avoid.edge.in_place_rate').value
+
+        radius = first_r if self.edge_phase < 3 else second_r
+        rate = speed / radius if radius > 0.0 else 0.0
+        turned = self.turned_so_far() or 0.0
+        # Phases 4-6 swing the other way, measured from where phase 3 ended.
+        base = self.edge_mark_turn if self.edge_phase >= 4 else 0.0
+        way = self.edge_dir if self.edge_phase < 3 else -self.edge_dir
+
+        if self.edge_phase == 0:
+            if self.edge_on_spot():
+                self.set_avoid(True, angular=self.edge_dir * spot_rate, linear=0.0)
+            else:
+                self.set_avoid(True, angular=self.edge_dir * rate, linear=speed)
+            if abs(turned) >= swing:
+                self.edge_phase = 1
+                self.edge_mark = self.pos
+                self.get_logger().info(
+                    f'turned {turned:+.0f} deg '
+                    f'{"on the spot" if self.edge_on_spot() else "off the corridor"}'
+                    f' - out {out:.2f} m before coming back')
+            return
+
+        if self.edge_phase == 1:
+            # Straight out, pointing across the corridor, before the arc
+            # back. Skipped when the first swing was an arc, which has
+            # already carried the robot across while it turned.
+            if not self.edge_on_spot():
+                self.edge_phase = 2
+                return
+            self.set_avoid(True, angular=0.0, linear=speed)
+            gone = self.edge_gone()
+            if gone is None or gone >= out:
+                self.edge_phase = 2
+                self.get_logger().info(
+                    f'out {0.0 if gone is None else gone:.2f} m - coming back')
+            return
+
+        if self.edge_phase == 2:
+            self.set_avoid(True, angular=-self.edge_dir * rate, linear=speed)
+            if not self.edge_crossed(turned, 0.0, self.edge_dir):
+                return
+            if not double:
+                self.finish_edge('round the board')
+                return
+            self.edge_phase = 3
+            self.edge_mark = self.pos
+            self.get_logger().info(
+                f'past the board - running {between:.2f} m straight before '
+                f'the next swing')
+            return
+
+        if self.edge_phase == 3:
+            self.set_avoid(True, angular=0.0, linear=speed)
+            gone = self.edge_gone()
+            if gone is None or gone >= between:
+                self.edge_phase = 4
+                self.edge_mark_turn = turned
+                self.get_logger().info(
+                    f'ran {0.0 if gone is None else gone:.2f} m - swinging the '
+                    f'other way now')
+            return
+
+        if self.edge_phase == 4:
+            self.set_avoid(True, angular=way * rate, linear=speed)
+            if abs(turned - base) >= swing:
+                self.edge_phase = 5
+                self.edge_mark = self.pos
+                self.get_logger().info(
+                    f'swung {turned - base:+.0f} deg the other way - '
+                    f'crossing {across:.2f} m before coming back')
+            return
+
+        if self.edge_phase == 5:
+            self.set_avoid(True, angular=0.0, linear=speed)
+            gone = self.edge_gone()
+            if gone is None or gone >= across:
+                self.edge_phase = 6
+                self.get_logger().info(
+                    f'crossed {0.0 if gone is None else gone:.2f} m - coming back')
+            return
+
+        self.set_avoid(True, angular=-way * rate, linear=speed)
+        if self.edge_crossed(turned, base, way):
+            self.finish_edge('round both boards')
+            return
+
+        waited = now - self.stage_since
+        if waited > g('construction.avoid.edge.give_up_s').value:
+            self.get_logger().warn(
+                f'still getting round a board after {waited:.0f} s '
+                f'(phase {self.edge_phase}, turned {turned:+.0f} deg) - '
+                f'handing back to the lane')
+            self.finish_edge('gave up getting round')
+
+    def edge_crossed(self, turned, base, way):
+        """Whether a swing has come back past the heading it left (ARX).
+
+        A sign change, not a tolerance. The swing went `way` from `base`, so
+        it is back once the difference has no sign left in that direction -
+        which a tick cannot step over, however coarse it is. The heading is
+        then within one tick of the corridor, 1.9 to 3.4 degrees, and lane
+        following takes over and finishes the job.
+        """
+        return (turned - base) * way <= 0.0
+
+    def edge_on_spot(self):
+        """Whether this swing turns on the spot rather than arcing (ARX)."""
+        if not self.get_parameter('construction.avoid.edge.in_place').value:
+            return False
+        if self.get_parameter(
+                'construction.avoid.edge.in_place_first_only').value:
+            return self.edge_count <= 1
+        return True
+
+    def edge_gone(self):
+        """Metres travelled since the straight run began, or None (ARX)."""
+        if self.edge_mark is None or self.pos is None:
+            return None
+        return math.hypot(self.pos[0] - self.edge_mark[0],
+                          self.pos[1] - self.edge_mark[1])
+
+    def finish_edge(self, why):
+        """Let go of the wheel and say which line to steer by now."""
+        # One zero command first, so control_lane is not left relaying the
+        # last rotation it was given.
+        self.set_avoid(True, angular=0.0, linear=0.0)
+        self.set_avoid(False)
+        if self.edge_phase >= 3:
+            # Two swings, so back on the side it started from.
+            self.hug_side = (FOLLOW_WHITE if self.edge_dir > 0
+                             else FOLLOW_YELLOW)
+            self.zone_done = True
+        else:
+            self.hug_side = (FOLLOW_YELLOW if self.edge_dir > 0
+                             else FOLLOW_WHITE)
+        self.go(STAGE_AVOID_CONSTRUCTION,
+                f'{why} - steering by the {SIDE_NAMES[self.hug_side]} line now')
 
     def tick_stopped(self):
         self.set_armed(MISSION_NONE)

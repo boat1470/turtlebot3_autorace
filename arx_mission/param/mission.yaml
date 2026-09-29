@@ -216,12 +216,142 @@
         # With this true the run ends against barrier_2, which is the point:
         # getting there at all proves the robot threaded past barrier_1 on
         # the white line.
-        stop_at_obstacle: true
+        stop_at_obstacle: false
 
         # Never sit in this stage for ever. A detector that says nothing
         # looks exactly like a clear corridor from here, and the give-up
         # message says which of the two it was.
         give_up_s: 60.0
+
+        # Swinging round a board that blocks the line being hugged.
+        #
+        # An arc out to swing_deg off the corridor heading and a mirrored arc
+        # back. Two arcs of radius r through the same angle move the robot
+        # 2r sideways and 2r forward, so one number sets both:
+        #
+        #   r      sideways   forward   clears barrier_2?
+        #   0.06     0.120     0.120    no
+        #   0.08     0.160     0.160    no
+        #   0.10     0.200     0.200    yes, by 10 mm
+        #   0.12     0.240     0.240    yes
+        #
+        # Measured need: 0.190 m sideways, inside the 0.314 m of corridor
+        # between the stop point and the face of barrier_2.
+        edge:
+          enabled: true
+
+          # Swing round the next board straight after the first, without
+          # going back to a lane line in between.
+          #
+          # The run that threaded all three boards touched barrier_3: closest
+          # approach zero, and it happened at yaw 15 degrees - the robot was
+          # still crossing when it arrived. The delay was returning to the
+          # yellow line, letting control_lane settle on it, and then waiting
+          # for the LiDAR to see the next board at 0.25 m, all inside the
+          # 0.36 m gap between the two boards.
+          #
+          # Simulated over both radii and the straight run between them,
+          # with the robot's edge kept inside the yellow line at x 1.392:
+          #
+          #   r1    between   b2      b3     over the line
+          #   0.10   0.20     hits    104    no
+          #   0.10   0.30      10      55    no
+          #   0.12   0.20      20      50    no          <- this
+          #   0.12   0.30      49       1    no
+          #   0.14   0.20      66       7    0 mm
+          #   0.16   0.10      21      67    40 mm
+          #
+          # Millimetres. Against 8 mm and a touch, measured on the real run.
+          #
+          # false goes back to one swing per board, which is the general rule
+          # - blocked ahead, go round to the other half - and works for any
+          # number of boards anywhere. This does not: it has the second board
+          # and its distance built in. The field at Daegu need not match the
+          # simulator, and the rules only say the obstacles are fixed to the
+          # ground, so this switch has to stay.
+          double_swerve: true
+
+          radius_m: 0.12
+          second_radius_m: 0.10
+
+          # Not optional. Coming straight back carries the robot into the
+          # board's own x range while it is still alongside its 0.10 m depth,
+          # which the simulation hits at any gap under 0.30 m for r1 = 0.10.
+          between_m: 0.25
+
+          # A straight run at the far end of the second swing, while the
+          # robot is across the corridor pointing back at the side it came
+          # from. Every centimetre here is a centimetre back towards that
+          # side, bought without turning any further - and turning further
+          # is what puts the outside of the arc over the lane line.
+          cross_m: 0.05
+
+          # Straight run right after the on-the-spot turn, while the robot is
+          # pointing across the corridor. Turning on the spot makes no
+          # sideways progress of its own, so this is where it comes from.
+          out_m: 0.10
+
+          # Turn on the spot instead of arcing round the board.
+          #
+          # An arc goes forward while it turns, so it spends the gap in front
+          # of the board getting closer to it, and it swings the outside of
+          # the robot wide. Measured over three runs, the outside went 72,
+          # 190 and 323 mm past the yellow line - in a corridor 0.485 m wide.
+          # Turning on the spot spends neither: the sideways move is the
+          # straight run between the two turns and nothing else, so there is
+          # one number to get right and it is exact.
+          #
+          # linear.x is zero while turning, which is not the robot having
+          # stopped - 90 degrees at 0.6 rad/s takes under two seconds,
+          # against the 30 the rules allow before a run is ended.
+          #
+          # false goes back to the arc version, which double_swerve,
+          # radius_m, second_radius_m and between_m belong to.
+          in_place: true
+          in_place_rate: 0.6
+
+          # Only for the first board in the zone.
+          #
+          # That is the one the robot arrives at square and at speed, with
+          # the least room to spare - measured at 13.4 mm of clearance with
+          # an arc against 35.3 mm turning on the spot. Once it is threading,
+          # the arc is quicker, and quicker matters against a 300 second
+          # limit for the whole course.
+          in_place_first_only: true
+
+          # omega comes out as speed / radius = 0.40 rad/s, against 1.88 the
+          # wheels can manage at this speed. The arc is 0.314 m long, so the
+          # whole swing takes about 8 seconds.
+          #
+          # Never zero: a run that has not moved for 30 seconds is ended by
+          # the rules, and turning on the spot is the easy way to trip that.
+          speed: 0.04
+
+          # 90 degrees off the corridor is the same fact as the white line
+          # lying flat in the camera instead of standing upright, which is
+          # the cue this behaviour was asked for. detect_lane cannot report
+          # it: its sliding windows walk up from the bottom of the frame
+          # fitting x as a function of y, and a flat line is not a function
+          # of y - it goes quiet, which looks like losing the line for any
+          # other reason. Yaw against the heading lane following had says
+          # the same thing and can be measured.
+          swing_deg: 90.0
+
+          # Measured over the whole seven-phase move, not one phase: it is
+          # timed from entering the stage. A real run came to
+          #
+          #   3.8  turn on the spot
+          #   3.5  out
+          #   8.4  arc back
+          #   8.8  straight between
+          #   5.4  arc out the other way
+          #   1.7  across
+          #   ...  arc back
+          #
+          # which is 35 seconds before the last arc has finished. At 25 it
+          # cut phase 6 off every time and handed back mid-turn, with a
+          # warning that read like the robot was stuck when it was not.
+          give_up_s: 90.0
 
     # --- lane following (arx_control_lane) ------------------------------
     control:
