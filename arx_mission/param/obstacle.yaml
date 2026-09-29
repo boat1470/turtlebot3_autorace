@@ -1,0 +1,62 @@
+---
+# arx_detect_obstacle. One file per node, because the /**: key gives every
+# node started with it the same values and the detectors want different
+# frame skips.
+/**:
+  ros__parameters:
+    obstacle:
+      # How far ahead something has to be before it counts as blocking.
+      #
+      # The LiDAR sits at the robot's centre and cannot see closer than
+      # 0.12 m, and a Burger is 0.178 m long, so its front face is 0.089 m
+      # out. Stopping at 0.25 m leaves about 0.16 m between the bumper and
+      # the board - enough to see it coming at 0.07 m/s without stopping so
+      # early that the gap beside it is out of reach.
+      stop_distance: 0.25
+
+      # Half the width of each window the scan is tested in. Three windows
+      # are used, all this wide: one straddling the robot's own track and
+      # one to each side of it.
+      #
+      # 0.06 is deliberately narrower than half a Burger (0.069). Measured
+      # from the course texture, the construction corridor is 0.485 m wide -
+      # two lane widths - with yellow at x 1.39 and white at x 1.88, and the
+      # boards alternate which half they block:
+      #
+      #   barrier_1  y 0.49-0.59  spans x 1.365-1.615   left half
+      #   barrier_2  y 0.95-1.05  spans x 1.620-1.870   right half
+      #   barrier_3  y 1.41-1.51  spans x 1.365-1.615   left half
+      #
+      # Hugging the white line puts the robot at x 1.752, which leaves only
+      # 0.065 m between its centre line and the far edge of barrier_1. A
+      # window wider than that would report the robot's own half blocked by
+      # a board it is driving past, and it would stop short of the first one
+      # instead of threading between them.
+      #
+      # What it costs: something that would clip the robot's shoulder by a
+      # centimetre goes unseen. Rule iii says touching an obstacle carries
+      # no penalty and that the obstacles are fixed to the ground, so a
+      # graze is survivable - being unable to pass at all is not.
+      half_width: 0.06
+
+      # Returns needed in a window before it counts. One stray point is
+      # noise; three in a 0.12 x 0.25 m box is a surface.
+      min_points: 3
+
+      # A scan is a few hundred points and the test is three numpy
+      # comparisons, which is nothing next to SIFT over a frame. No reason
+      # to drop any.
+      frame_skip: 1
+
+      # The example drew this same picture with cv2.imshow from inside the
+      # LiDAR callback, which needs a display: on a Pi 4 over SSH that
+      # raises inside the callback and kills the node. Published as a topic
+      # it is the same picture, viewable from another machine.
+      #
+      #   ros2 run rqt_image_view rqt_image_view   # /detect/image_obstacle/compressed
+      publish_debug_image: true
+
+      # Run without waiting to be armed, for looking at the windows on their
+      # own. Never for a real run - the rules allow props on the course that
+      # belong to no mission.
+      always_on: false

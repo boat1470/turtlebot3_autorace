@@ -145,6 +145,7 @@ def stack(context, *unused_args, **unused_kwargs):
         # position in the order only has to be after the camera pipeline.
         include('arx_mission', 'traffic_light.launch.py'),
         include('arx_mission', 'detect_sign.launch.py'),
+        include('arx_mission', 'detect_obstacle.launch.py'),
     ]
 
     # The sequencer still comes up before control_lane. It no longer has to -

@@ -93,6 +93,7 @@ STAGE_DRIVE_TO_SIGN = 'drive_to_sign'
 STAGE_TURN = 'turn'
 STAGE_FOLLOW_SIDE = 'follow_side'
 STAGE_DRIVE_TO_CONSTRUCTION = 'drive_to_construction'
+STAGE_AVOID_CONSTRUCTION = 'avoid_construction'
 
 # /detect/lane_state, from detect_lane: which line it is steering by.
 LANE_STATE_FOR_SIDE = {FOLLOW_YELLOW: 1, FOLLOW_WHITE: 3}
@@ -107,8 +108,18 @@ STAGES = frozenset({
     STAGE_TURN,
     STAGE_FOLLOW_SIDE,
     STAGE_DRIVE_TO_CONSTRUCTION,
+    STAGE_AVOID_CONSTRUCTION,
     STAGE_STOPPED,
 })
+
+# /detect/obstacle, from detect_obstacle: which of the three strips ahead of
+# the robot has a board in it. Relative to the robot, not to the corridor -
+# a robot hugging the white line is already in the right half, so a board
+# blocking that half is straight in front of it.
+BLOCKED_NONE = 0
+BLOCKED_AHEAD = 1
+BLOCKED_LEFT = 2
+BLOCKED_RIGHT = 4
 
 
 class MissionControl(Node):
@@ -279,6 +290,24 @@ class MissionControl(Node):
         self.declare_parameter('construction.heading.center_deg', 0.0)
         self.declare_parameter('construction.heading.tolerance_deg', 45.0)
 
+        # Threading the boards, once the sign says they are coming.
+        #
+        # Measured from the course texture, the corridor there is 0.485 m
+        # wide - two lane widths - and the boards alternate which half they
+        # block. Hugging the white line puts the steering target 6 mm from
+        # the middle of the gap the first board leaves, which is why this
+        # needs no avoidance controller of its own: detect_lane already
+        # knows how to hug a line and control_lane already knows how to
+        # drive to it.
+        self.declare_parameter('construction.avoid.enabled', True)
+        # Stop in front of the first board that blocks the side being
+        # hugged, rather than swapping sides and carrying on. The debug step
+        # for this leg: swapping is the next piece of work.
+        self.declare_parameter('construction.avoid.stop_at_obstacle', True)
+        # Never sit in this stage for ever. A detector that says nothing
+        # looks exactly like a clear corridor from here.
+        self.declare_parameter('construction.avoid.give_up_s', 60.0)
+
         self.declare_parameter('rate_hz', 10.0)
 
         # Which stage a run begins in (ARX). The default is the whole course
@@ -353,6 +382,9 @@ class MissionControl(Node):
         # picked is long behind, and there is nothing left to hug a single
         # line for. Not on entering the stage - on reading the sign.
         self.construction_seen = False
+        # Latest report from detect_obstacle. None until one arrives, which
+        # is not the same as a clear corridor and is treated differently.
+        self.blocked = None
 
         self.pub_armed = self.create_publisher(UInt8, '/arx/armed_mission', 1)
         # Republished every tick. Idempotent, and it means a control_lane
@@ -371,6 +403,7 @@ class MissionControl(Node):
         self.create_subscription(UInt8, '/arx/traffic_light', self.on_light, 1)
         self.create_subscription(UInt8, '/detect/traffic_sign', self.on_sign, 1)
         self.create_subscription(Odometry, '/odom', self.on_odom, 1)
+        self.create_subscription(UInt8, '/detect/obstacle', self.on_obstacle, 1)
 
         self.timer = self.create_timer(
             1.0 / max(self.get_parameter('rate_hz').value, 0.1), self.tick)
@@ -413,6 +446,10 @@ class MissionControl(Node):
         self.yaw = math.degrees(math.atan2(
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y * q.y + q.z * q.z)))
+
+    def on_obstacle(self, msg):
+        """Which half of the corridor ahead detect_obstacle says is blocked."""
+        self.blocked = msg.data
 
     def heading_ok(self, prefix=None):
         """Whether the robot is pointing a way this mission's board can be seen from."""
@@ -555,6 +592,8 @@ class MissionControl(Node):
             self.tick_follow_side()
         elif self.stage == STAGE_DRIVE_TO_CONSTRUCTION:
             self.tick_drive_to_construction(now)
+        elif self.stage == STAGE_AVOID_CONSTRUCTION:
+            self.tick_avoid_construction(now)
         else:
             self.tick_stopped()
 
@@ -779,6 +818,11 @@ class MissionControl(Node):
                 f'({self.sign_msgs} seen, {self.sign_rejected} ignored on heading)')
             if self.get_parameter('construction.stop_after_detect').value:
                 self.stop('construction sign - stopping here, as asked')
+            elif self.get_parameter('construction.avoid.enabled').value:
+                self.go(STAGE_AVOID_CONSTRUCTION,
+                        'construction sign - threading the boards')
+            else:
+                self.go(STAGE_FOLLOW_SIDE, 'construction sign read')
             return
 
         waited = now - self.stage_since
@@ -791,6 +835,48 @@ class MissionControl(Node):
                 f'heading, facing {yaw}, last {len(recent)}: {recent}) '
                 f'- carrying on')
             self.go(STAGE_FOLLOW_SIDE, 'gave up on the construction sign')
+
+    def tick_avoid_construction(self, now):
+        """Thread the boards by hugging the line on the open side.
+
+        No avoidance controller, no open-loop turns, no odometry. The boards
+        alternate which half of a double-width corridor they block, and
+        hugging a line is already how this stack drives half a corridor -
+        detect_lane picks the line out and control_lane steers to it with
+        gains that have been tuned on the course.
+
+        Measured against the course texture: hugging white aims at x 1.752
+        and the gap the first board leaves is centred on 1.746; hugging
+        yellow aims at 1.517 against a gap centred on 1.506. Six and eleven
+        millimetres out, from a mechanism built for a different mission.
+        """
+        self.set_driving(True)
+        self.set_avoid(False)
+        self.set_armed(MISSION_CONSTRUCTION)
+        # White first: the first board blocks the left half, so the right
+        # half is the one to be in.
+        side = FOLLOW_WHITE
+        self.set_follow_side(side)
+
+        if (self.blocked is not None
+                and self.blocked & BLOCKED_AHEAD
+                and self.get_parameter(
+                    'construction.avoid.stop_at_obstacle').value):
+            self.stop(f'board across the {SIDE_NAMES[side]} line - '
+                      f'stopping here, as asked')
+            return
+
+        waited = now - self.stage_since
+        if waited > self.get_parameter('construction.avoid.give_up_s').value:
+            # Two different faults look the same from here, so say which:
+            # no report at all means detect_obstacle never armed or never
+            # ran, while reports that stayed clear means the windows are
+            # looking somewhere the boards are not.
+            seen = 'no report yet' if self.blocked is None else f'last {self.blocked}'
+            self.get_logger().warn(
+                f'still in the construction zone after {waited:.0f} s '
+                f'({seen}) - carrying on')
+            self.go(STAGE_FOLLOW_SIDE, 'gave up threading the boards')
 
     def tick_stopped(self):
         self.set_armed(MISSION_NONE)

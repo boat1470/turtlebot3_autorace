@@ -132,11 +132,12 @@
       enabled: true
       window: 7
       confirm_votes: 5
+
       vote_max_age_s: 3.0
 
-      # Stop where the sign was found. The debug step asked for while the
-      # detection is being trusted; nothing is built on top of it yet.
-      stop_after_detect: true
+      # Stop where the sign was found. The debug step from while the
+      # detection was being trusted. Off now that there is a stage after it.
+      stop_after_detect: false
 
       # Measured from the moment the junction is behind us, and the board is
       # most of the way round the course from there.
@@ -155,6 +156,43 @@
         enabled: true
         center_deg: 0.0
         tolerance_deg: 45.0
+
+      # Threading the boards, once the sign says they are coming.
+      #
+      # Measured from the course texture rather than guessed: the corridor
+      # through the construction zone is 0.485 m wide - two lane widths,
+      # yellow at x 1.39 and white at x 1.88 - and the three boards
+      # alternate which half they block:
+      #
+      #   barrier_1  y 0.49-0.59  spans x 1.365-1.615   left half
+      #   barrier_2  y 0.95-1.05  spans x 1.620-1.870   right half
+      #   barrier_3  y 1.41-1.51  spans x 1.365-1.615   left half
+      #
+      # So it is a slalom right, left, right - and hugging a line is already
+      # how this stack drives half a corridor. Hugging white aims the
+      # steering at x 1.752 against a gap centred on 1.746, and hugging
+      # yellow at 1.517 against 1.506. Six and eleven millimetres, from the
+      # mechanism built for the junction.
+      #
+      # That is why there is no avoidance controller here: detect_lane finds
+      # the line, control_lane steers to it with gains already tuned on this
+      # course, and this stage only chooses which line.
+      avoid:
+        enabled: true
+
+        # Stop in front of the first board blocking the side being hugged,
+        # instead of swapping sides and carrying on. The debug step for this
+        # leg - the swap is the next piece of work.
+        #
+        # With this true the run ends against barrier_2, which is the point:
+        # getting there at all proves the robot threaded past barrier_1 on
+        # the white line.
+        stop_at_obstacle: true
+
+        # Never sit in this stage for ever. A detector that says nothing
+        # looks exactly like a clear corridor from here, and the give-up
+        # message says which of the two it was.
+        give_up_s: 60.0
 
     # --- lane following (arx_control_lane) ------------------------------
     control:
