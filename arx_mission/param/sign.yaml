@@ -14,7 +14,7 @@
       #
       # The values keep the numbers the example's own Enum produced
       # (construction 1, left 2, right 3) so its tooling still reads them.
-      names: [left, right, construction]
+      names: [left, right, construction, parking]
 
       left:
         mission: 2
@@ -28,6 +28,14 @@
         mission: 3
         value: 1
         image: construction.png
+      # 4, not the 1 the example's own Enum gives it. Every sign detector
+      # over there has its own Enum starting at 1, so its parking sign and
+      # its construction board are both 1 - which is fine when they are
+      # different nodes and not fine here.
+      parking:
+        mission: 4
+        value: 4
+        image: parking.png
 
       # Good matches a reference image needs before it is considered at all.
       # The original wrote `len(good) > MIN_MATCH_COUNT` with MIN_MATCH_COUNT

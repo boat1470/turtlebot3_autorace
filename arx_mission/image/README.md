@@ -69,3 +69,23 @@ cut from:
 
 The board is textured identically on both broad faces, so east and west
 views are the same size at the same distance and either will do.
+
+## parking.png
+
+Cut the same way, from 0.28 m west of the board, and graded the same way -
+each candidate scored on the frames it was not cut from:
+
+  cut from     total inliers on the other three frames
+  0.28 m                                            24
+  0.35 m                                            23
+  0.22 m                                            16
+  0.17 m                                            14
+
+0.28 m by a nose over 0.35, and the two are close enough that the choice
+hardly matters. The blue board carries far less for SIFT to hold on to than
+the construction triangle does - 33 descriptors against 150 - which is why
+the scores here are 5 to 10 inliers where the construction board manages 10
+to 33. The published score is inliers over the reference's own descriptor
+count, so a thin reference is not penalised for being thin; but the margin
+over min_inliers is smaller, and that is worth remembering if this sign
+starts being missed.

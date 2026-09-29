@@ -353,6 +353,74 @@
           # warning that read like the robot was stuck when it was not.
           give_up_s: 90.0
 
+    # --- mission 4, the parking sign -----------------------------------
+    # Same shape as the other two sign hunts, with one condition they do not
+    # have: the board only counts while detect_lane has both lines.
+    #
+    # Coming out of the construction zone the robot is still in a corridor
+    # two lanes wide with boards standing in it, and a sign detector looking
+    # at that has plenty to match against by accident. Both lines in view is
+    # what says the road has gone back to an ordinary single lane, which is
+    # where the parking board actually is.
+    parking:
+      enabled: true
+      window: 7
+      confirm_votes: 5
+
+      # Six, like the construction board and for the same reason: this one
+      # is passed side-on while the robot drives, not stared at.
+      vote_max_age_s: 6.0
+
+      # Stop where the sign was found. The debug step - nothing is built on
+      # top of it yet.
+      stop_after_detect: true
+
+      give_up_s: 120.0
+
+      heading:
+        # The board is at (0.74, 1.95) turned -90 degrees in the world file,
+        # the same as the arrow and the construction board, so its broad
+        # faces are normal to the world x axis and it can only be read while
+        # the robot looks along x. 180 is looking towards -x.
+        enabled: true
+        center_deg: 180.0
+        tolerance_deg: 45.0
+
+      # Both lines in view.
+      #
+      # Judged from /detect/yellow_line_reliability and
+      # /detect/white_line_reliability, not from lane_state. lane_state says
+      # which line the steering is using, and this stage keeps hugging the
+      # one the boards left the robot on - so it reads 3 by definition and
+      # can never say "both", however clearly the yellow line is in frame.
+      # A first run failed exactly that way: fifteen good matches of the
+      # board, the heading gate open, and nothing confirmed.
+      #
+      # The reliabilities are worked out from both masks every frame
+      # whatever follow_side says, so they stay live.
+      # Off for now. Two runs never had both reliabilities up at once, and
+      # the reason turned out not to be the road: measured off the texture,
+      # from x 1.25 down to the board the lane is an ordinary 0.254 m wide -
+      # yellow at y 1.625, white at y 1.879 - with the robot running down
+      # the middle of it at y 1.744, so both lines are well inside the
+      # bird's-eye view.
+      #
+      # It is the measure. Reliability counts rows of the frame that contain
+      # the line and wants over 500 of 600, so a line that is plainly in
+      # view but does not run the whole height of the frame reads zero.
+      # lane_state would say it properly, but it reports which line the
+      # steering is using, and this stage pins that to white.
+      #
+      # Turning it back on wants detect_lane to publish the pixel counts it
+      # already computes, which is a publisher rather than a change of
+      # algorithm - but that is a separate piece of work.
+      require_both_lines: false
+
+      # Reliability counts how much of the frame a line fills and moves by 5
+      # a frame, so 50 is about ten frames of having seen it - a second or
+      # so at the rate detect_lane publishes.
+      min_reliability: 50
+
     # --- lane following (arx_control_lane) ------------------------------
     control:
       # Raised from the example's 0.0025. At that gain the robot had to be

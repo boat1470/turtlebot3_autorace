@@ -66,9 +66,14 @@ NAMES = {LIGHT_UNKNOWN: 'unknown', LIGHT_RED: 'red',
 SIGN_CONSTRUCTION = 1
 SIGN_LEFT = 2
 SIGN_RIGHT = 3
+# ARX: the example gives every sign its own Enum starting at 1, so its
+# parking sign is also 1 and collides with the construction board. One node
+# reading them all cannot have that, so parking gets the next free number.
+SIGN_PARKING = 4
 
 SIGN_NAMES = {SIGN_CONSTRUCTION: 'construction',
-              SIGN_LEFT: 'left', SIGN_RIGHT: 'right'}
+              SIGN_LEFT: 'left', SIGN_RIGHT: 'right',
+              SIGN_PARKING: 'parking'}
 
 # /arx/follow_side - must match detect_lane.py. Which lane line detect_lane
 # should steer by once the junction has been decided: the yellow one on the
@@ -87,6 +92,7 @@ MISSION_NONE = 0
 MISSION_TRAFFIC_LIGHT = 1
 MISSION_INTERSECTION = 2
 MISSION_CONSTRUCTION = 3
+MISSION_PARKING = 4
 
 STAGE_WAIT_GREEN = 'wait_green'
 STAGE_DRIVE_TO_SIGN = 'drive_to_sign'
@@ -95,6 +101,7 @@ STAGE_FOLLOW_SIDE = 'follow_side'
 STAGE_DRIVE_TO_CONSTRUCTION = 'drive_to_construction'
 STAGE_AVOID_CONSTRUCTION = 'avoid_construction'
 STAGE_EDGE_PAST_BOARD = 'edge_past_board'
+STAGE_DRIVE_TO_PARKING = 'drive_to_parking'
 
 # /detect/lane_state, from detect_lane: which line it is steering by.
 LANE_STATE_FOR_SIDE = {FOLLOW_YELLOW: 1, FOLLOW_WHITE: 3}
@@ -113,6 +120,7 @@ STAGES = frozenset({
     STAGE_DRIVE_TO_CONSTRUCTION,
     STAGE_AVOID_CONSTRUCTION,
     STAGE_EDGE_PAST_BOARD,
+    STAGE_DRIVE_TO_PARKING,
     STAGE_STOPPED,
 })
 
@@ -392,6 +400,36 @@ class MissionControl(Node):
         # the heading it was aiming for, still turning away from it.
         self.declare_parameter('construction.avoid.edge.give_up_s', 25.0)
 
+        # --- mission 4, the parking sign ---------------------------------
+        # Same shape as the other two sign hunts. What is different is the
+        # second condition: the board only counts when detect_lane has both
+        # lines, which is what says the robot is back on an ordinary
+        # single-width lane rather than still in the construction corridor,
+        # where the boards and the double width make a stray match likely.
+        self.declare_parameter('parking.enabled', True)
+        self.declare_parameter('parking.window', 7)
+        self.declare_parameter('parking.confirm_votes', 5)
+        # Six, like the construction board and for the same reason: this one
+        # is also passed side-on while the robot drives, not stared at.
+        self.declare_parameter('parking.vote_max_age_s', 6.0)
+        # Stop where the sign was found. The debug step; nothing is built on
+        # top of it yet.
+        self.declare_parameter('parking.stop_after_detect', True)
+        self.declare_parameter('parking.give_up_s', 120.0)
+        # The board sits at (0.74, 1.95) turned -90 degrees in the world
+        # file, the same as the others, so it can only be read along the
+        # world x axis. 180 is looking towards -x.
+        self.declare_parameter('parking.heading.enabled', True)
+        self.declare_parameter('parking.heading.center_deg', 180.0)
+        self.declare_parameter('parking.heading.tolerance_deg', 45.0)
+        # Both lines in view. Judged from the two reliability topics, not
+        # from lane_state: while follow_side pins the steering to white,
+        # lane_state is 3 by definition and can never say both.
+        self.declare_parameter('parking.require_both_lines', True)
+        # Reliability counts how much of the frame a line fills and moves by
+        # 5 a frame, so 50 is about ten frames of having seen it.
+        self.declare_parameter('parking.min_reliability', 50)
+
         self.declare_parameter('rate_hz', 10.0)
 
         # Which stage a run begins in (ARX). The default is the whole course
@@ -452,6 +490,8 @@ class MissionControl(Node):
         self.turn_last_yaw = None
         self.turn_accum = 0.0
         self.lane_state = None
+        self.yellow_ok = None
+        self.white_ok = None
         # Whether the last report was counted, so the log can say when that
         # changes. Without it the only record of the gate's work was the
         # give-up message, which a successful run never prints - so a run
@@ -484,8 +524,9 @@ class MissionControl(Node):
         # tight one, so it is the one that gets the slower, surer move.
         self.edge_count = 0
         # Set once a double swing has taken the robot round both boards.
-        # The steering stays on the line it came back to; the flag only
-        # says the threading part is behind us.
+        # The steering stays on the line it came back to - the parking sign
+        # is what ends this stage now, not the boards - but the flag says
+        # the threading part is behind us.
         self.zone_done = False
         self.corridor_yaw = None
         self.pos = None
@@ -508,6 +549,15 @@ class MissionControl(Node):
         self.create_subscription(UInt8, '/detect/traffic_sign', self.on_sign, 1)
         self.create_subscription(Odometry, '/odom', self.on_odom, 1)
         self.create_subscription(UInt8, '/detect/obstacle', self.on_obstacle, 1)
+        # How much of the frame each line fills, as detect_lane sees it.
+        # Both are computed every frame whatever follow_side says, so they
+        # stay live while the robot is hugging one of them - which
+        # lane_state does not: hugging white makes it 3 by definition, and
+        # it can never report both lines while that is set.
+        self.create_subscription(
+            UInt8, '/detect/yellow_line_reliability', self.on_yellow_ok, 1)
+        self.create_subscription(
+            UInt8, '/detect/white_line_reliability', self.on_white_ok, 1)
 
         self.timer = self.create_timer(
             1.0 / max(self.get_parameter('rate_hz').value, 0.1), self.tick)
@@ -608,6 +658,8 @@ class MissionControl(Node):
         """Which parameter block governs the sign hunt in this stage."""
         if self.stage == STAGE_DRIVE_TO_CONSTRUCTION:
             return 'construction'
+        if self.stage == STAGE_DRIVE_TO_PARKING:
+            return 'parking'
         return 'intersection'
 
     def reset_votes(self):
@@ -662,6 +714,28 @@ class MissionControl(Node):
         """Remember what detect_lane is steering by, for the logs."""
         self.lane_state = msg.data
 
+    def on_yellow_ok(self, msg):
+        """How much of the frame the yellow line fills, 0 to 100."""
+        self.yellow_ok = msg.data
+
+    def on_white_ok(self, msg):
+        """How much of the frame the white line fills, 0 to 100."""
+        self.white_ok = msg.data
+
+    def both_lines(self):
+        """Whether detect_lane can see both lines right now (ARX).
+
+        Read off the two reliability topics rather than lane_state, because
+        lane_state says which line the steering is using: while follow_side
+        pins it to white it is 3 by definition and will never be 2, however
+        clearly the yellow line is in frame. The reliabilities are worked
+        out from both masks every frame regardless.
+        """
+        need = self.get_parameter('parking.min_reliability').value
+        if self.yellow_ok is None or self.white_ok is None:
+            return False
+        return self.yellow_ok >= need and self.white_ok >= need
+
     def set_avoid(self, active, angular=0.0, linear=0.0):
         """Take the wheel directly, or hand it back to lane following."""
         flag = Bool()
@@ -707,6 +781,8 @@ class MissionControl(Node):
             self.tick_avoid_construction(now)
         elif self.stage == STAGE_EDGE_PAST_BOARD:
             self.tick_edge_past_board(now)
+        elif self.stage == STAGE_DRIVE_TO_PARKING:
+            self.tick_drive_to_parking(now)
         else:
             self.tick_stopped()
 
@@ -981,9 +1057,11 @@ class MissionControl(Node):
                 self.start_edge(now)
                 return
 
-        if self.zone_done:
-            # Both boards are behind us.
-            self.go(STAGE_FOLLOW_SIDE, 'boards done')
+        if self.zone_done and self.get_parameter('parking.enabled').value:
+            # Both boards are behind us. Nothing else in this zone is worth
+            # looking for, so start hunting the next mission's sign.
+            self.reset_votes()
+            self.go(STAGE_DRIVE_TO_PARKING, 'boards done - on to the parking sign')
             return
 
         waited = now - self.stage_since
@@ -1207,6 +1285,62 @@ class MissionControl(Node):
                              else FOLLOW_WHITE)
         self.go(STAGE_AVOID_CONSTRUCTION,
                 f'{why} - steering by the {SIDE_NAMES[self.hug_side]} line now')
+
+    def tick_drive_to_parking(self, now):
+        """Carry on down the course until the parking sign is read.
+
+        Two conditions, not one. The heading gate is the same idea as the
+        other two boards - this one is turned -90 degrees in the world file
+        as well, so it can only be read along the world x axis.
+
+        The second is that detect_lane has both lines. Coming out of the
+        construction zone the robot is still in a corridor two lanes wide
+        with boards in it, and a sign detector looking at that has plenty to
+        match against by accident. Both lines in view is what says the road
+        has gone back to an ordinary single lane, which is where the parking
+        board actually is.
+        """
+        self.set_driving(True)
+        self.set_avoid(False)
+        # Keep steering by the line the threading left the robot on.
+        #
+        # The mean of both lines was tried and drove worse: the robot came
+        # off the run along y 1.744 at x 1.28 and wandered south, with
+        # lane_state 0 the whole way. Hugging white it held that line from
+        # x 1.6 down to 0.66, which is the line the parking board stands on.
+        self.set_follow_side(self.hug_side)
+        self.set_armed(MISSION_PARKING)
+
+        winner, votes = self.sign_majority({SIGN_PARKING})
+        both = self.both_lines()
+        need_both = self.get_parameter('parking.require_both_lines').value
+        if winner is not None and (both or not need_both):
+            self.get_logger().info(
+                f'parking sign confirmed: {votes} of the last '
+                f'{len(self.fresh_votes())} reports '
+                f'({self.sign_msgs} seen, {self.sign_rejected} ignored on '
+                f'heading, lines yellow {self.yellow_ok} white {self.white_ok})')
+            if self.get_parameter('parking.stop_after_detect').value:
+                self.stop('parking sign - stopping here, as asked')
+            else:
+                self.go(STAGE_FOLLOW_SIDE, 'parking sign read')
+            return
+
+        waited = now - self.stage_since
+        if waited > self.get_parameter('parking.give_up_s').value:
+            recent = [SIGN_NAMES.get(v, v) for v in self.fresh_votes()]
+            yaw = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+            # Three different faults look the same from here, so name which:
+            # no reports at all, reports that never formed a majority, or a
+            # majority that was never allowed because the lines were not
+            # both in view.
+            self.get_logger().warn(
+                f'no parking sign after {waited:.0f} s '
+                f'({self.sign_msgs} reports, {self.sign_rejected} dropped on '
+                f'heading, facing {yaw}, lines yellow {self.yellow_ok} '
+                f'white {self.white_ok}, '
+                f'last {len(recent)}: {recent}) - carrying on')
+            self.go(STAGE_FOLLOW_SIDE, 'gave up on the parking sign')
 
     def tick_stopped(self):
         self.set_armed(MISSION_NONE)
