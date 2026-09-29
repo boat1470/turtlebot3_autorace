@@ -103,6 +103,8 @@ STAGE_AVOID_CONSTRUCTION = 'avoid_construction'
 STAGE_EDGE_PAST_BOARD = 'edge_past_board'
 STAGE_DRIVE_TO_PARKING = 'drive_to_parking'
 STAGE_DRIVE_TO_LOT = 'drive_to_lot'
+STAGE_PICK_BAY = 'pick_bay'
+STAGE_PARK_IN_BAY = 'park_in_bay'
 
 # /detect/lane_state, from detect_lane: which line it is steering by.
 LANE_STATE_FOR_SIDE = {FOLLOW_YELLOW: 1, FOLLOW_WHITE: 3}
@@ -123,6 +125,8 @@ STAGES = frozenset({
     STAGE_EDGE_PAST_BOARD,
     STAGE_DRIVE_TO_PARKING,
     STAGE_DRIVE_TO_LOT,
+    STAGE_PICK_BAY,
+    STAGE_PARK_IN_BAY,
     STAGE_STOPPED,
 })
 
@@ -130,6 +134,16 @@ STAGES = frozenset({
 # the robot has a board in it. Relative to the robot, not to the corridor -
 # a robot hugging the white line is already in the right half, so a board
 # blocking that half is straight in front of it.
+# /detect/obstacle_side, from detect_obstacle: which side of the robot has
+# something standing next to it. The robot's own left and right, not the
+# course's - a robot facing into the parking lot has the bay at the larger x
+# on its LEFT, and naming these after the course is the mistake that once put
+# the construction stage into the sign beside the track.
+SIDE_CLEAR = 0
+SIDE_LEFT = 1
+SIDE_RIGHT = 2
+SIDE_NAMES = {SIDE_LEFT: 'left', SIDE_RIGHT: 'right'}
+
 BLOCKED_NONE = 0
 BLOCKED_AHEAD = 1
 BLOCKED_LEFT = 2
@@ -486,8 +500,84 @@ class MissionControl(Node):
         # rather than recovering now, so the errors it sees are small.
         self.declare_parameter('lot.kp', 0.02)
         self.declare_parameter('lot.max_angular', 0.5)
-        self.declare_parameter('lot.stop_at_end', True)
+        self.declare_parameter('lot.stop_at_end', False)
         self.declare_parameter('lot.give_up_s', 60.0)
+
+        # Which bay to park in (ARX). Read off /detect/obstacle_side while
+        # standing still between the two of them, which is the one piece of
+        # the 2018 example's detect_parking.py worth keeping: it scans 30
+        # degrees either side of straight left and straight right against
+        # half a metre. The rest of that file is dead reckoning - straight
+        # 0.45, left 90, straight 1.0 - and this package reaches the same
+        # place by following the yellow line instead.
+        self.declare_parameter('bay.enabled', True)
+        # Stand still this long before reading. The robot arrives with its
+        # own drift still settling, and the scan is free, so there is no
+        # reason to act on the first one.
+        self.declare_parameter('bay.settle_s', 1.0)
+        # Which to take when both are empty. Right, like the example, which
+        # tested the right first - and in the simulator both ARE empty unless
+        # full.launch.py blocked:= puts a robot in one.
+        self.declare_parameter('bay.prefer', 'right')
+        self.declare_parameter('bay.stop_after_pick', True)
+        self.declare_parameter('bay.give_up_s', 20.0)
+
+        # Backing into the bay and coming out again (ARX). Five phases:
+        #
+        #   0 turn 90 degrees on the spot, so the empty bay is behind
+        #   1 reverse into it
+        #   2 stand there
+        #   3 drive out on a quarter circle, turning the same way again
+        #   4 hold the heading until there is a line to follow, then hand back
+        #
+        # Reversing in rather than driving in, because the robot has to leave
+        # again: parked nose-first it would have to reverse out blind down a
+        # 0.25 m column, and parked tail-first the whole exit is one forward
+        # arc.
+        self.declare_parameter('bay.park.enabled', True)
+        self.declare_parameter('bay.park.turn_deg', 90.0)
+        self.declare_parameter('bay.park.turn_rate', 0.6)
+        self.declare_parameter('bay.park.speed', 0.04)
+        # Two distances, not one, because the robot does not stop in the
+        # middle of the column. It stops at x 0.476 against a middle of
+        # 0.506 - four runs agreeing to 3.5 mm - so the bay centres at 0.754
+        # and 0.258 are 0.278 and 0.218 away. A single figure would leave 4 mm
+        # at one end of a bay that only has 68 mm to give.
+        self.declare_parameter('bay.park.into_left_m', 0.278)
+        self.declare_parameter('bay.park.into_right_m', 0.218)
+        # Stand still in the bay. Zero is what was asked for; the knob is
+        # here because being seen stopped in the bay may be what the rules
+        # actually score.
+        self.declare_parameter('bay.park.hold_s', 0.0)
+        # The quarter circle out. From the left bay's centre at (0.754,
+        # 0.754) facing -x, turning right through 90 degrees on this radius
+        # ends at (0.506, 1.002) facing +y - the middle of the mouth, pointed
+        # up the corridor - so no straight run is needed before or after it.
+        # omega is speed/radius, 0.161 rad/s here against a wheel ceiling of
+        # 2.25 at this speed.
+        self.declare_parameter('bay.park.radius_m', 0.248)
+        # Creep on the exit heading until detect_lane has something again,
+        # then hand back to it. Without this the wheel goes back at the top
+        # of the arc, where the robot is still inside the pocket and there is
+        # no line for another 50 mm.
+        self.declare_parameter('bay.park.rejoin', True)
+        self.declare_parameter('bay.park.rejoin_ticks', 3)
+        # Once there is a line again, follow the YELLOW one until the robot is
+        # pointing back down the road, and only then hand to the mean of both.
+        #
+        # Handing straight to the mean did not work. The robot came up the
+        # corridor correctly to (0.469, 1.624), then turned past 180 to -139.7
+        # and drove back down into the pocket. The corridor has a yellow wall
+        # on BOTH sides and no white one, so detect_lane reports lane_state 1
+        # whichever it locks onto, and at the top the yellow it was holding
+        # curves away west - the robot followed it round and back in.
+        #
+        # Naming the line and the heading to leave on takes both guesses out:
+        # the yellow line is the one that leads out of the pocket and onto the
+        # road, and 180 is the road.
+        self.declare_parameter('bay.park.leave_heading_deg', 180.0)
+        self.declare_parameter('bay.park.leave_tolerance_deg', 20.0)
+        self.declare_parameter('bay.park.give_up_s', 90.0)
 
         self.declare_parameter('rate_hz', 10.0)
 
@@ -624,6 +714,19 @@ class MissionControl(Node):
         self.lot_recent = deque(maxlen=60)
         self.lot_turn = 0.0
         self.lot_last_yaw = None
+        # Latest report from detect_obstacle's side wedges, and the bay
+        # chosen from it.
+        self.side = None
+        self.bay = None
+        # Backing into the bay: which phase, which way round, and the marks
+        # each phase measures from.
+        self.park_phase = 0
+        self.park_way = 0
+        self.park_mark = None
+        self.park_turn = 0.0
+        self.park_last_yaw = None
+        self.park_since = None
+        self.park_ticks = 0
 
         self.pub_armed = self.create_publisher(UInt8, '/arx/armed_mission', 1)
         # Republished every tick. Idempotent, and it means a control_lane
@@ -643,6 +746,7 @@ class MissionControl(Node):
         self.create_subscription(UInt8, '/detect/traffic_sign', self.on_sign, 1)
         self.create_subscription(Odometry, '/odom', self.on_odom, 1)
         self.create_subscription(UInt8, '/detect/obstacle', self.on_obstacle, 1)
+        self.create_subscription(UInt8, '/detect/obstacle_side', self.on_side, 1)
         # How much of the frame each line fills, as detect_lane sees it.
         # Both are computed every frame whatever follow_side says, so they
         # stay live while the robot is hugging one of them - which
@@ -709,6 +813,10 @@ class MissionControl(Node):
     def on_obstacle(self, msg):
         """Which half of the corridor ahead detect_obstacle says is blocked."""
         self.blocked = msg.data
+
+    def on_side(self, msg):
+        """Which side of the robot detect_obstacle says is taken (ARX)."""
+        self.side = msg.data
 
     def heading_ok(self, prefix=None):
         """Whether the robot is pointing a way this mission's board can be seen from."""
@@ -884,6 +992,10 @@ class MissionControl(Node):
             self.tick_drive_to_parking(now)
         elif self.stage == STAGE_DRIVE_TO_LOT:
             self.tick_drive_to_lot(now)
+        elif self.stage == STAGE_PICK_BAY:
+            self.tick_pick_bay(now)
+        elif self.stage == STAGE_PARK_IN_BAY:
+            self.tick_park_in_bay(now)
         else:
             self.tick_stopped()
 
@@ -1363,12 +1475,15 @@ class MissionControl(Node):
             return self.edge_count <= 1
         return True
 
+    def dist_from(self, mark):
+        """Metres travelled since a mark was taken, or None (ARX)."""
+        if mark is None or self.pos is None:
+            return None
+        return math.hypot(self.pos[0] - mark[0], self.pos[1] - mark[1])
+
     def edge_gone(self):
         """Metres travelled since the straight run began, or None (ARX)."""
-        if self.edge_mark is None or self.pos is None:
-            return None
-        return math.hypot(self.pos[0] - self.edge_mark[0],
-                          self.pos[1] - self.edge_mark[1])
+        return self.dist_from(self.edge_mark)
 
     def finish_edge(self, why):
         """Let go of the wheel and say which line to steer by now."""
@@ -1447,10 +1562,7 @@ class MissionControl(Node):
 
     def lot_gone(self):
         """Metres travelled since the mouth came into view, or None (ARX)."""
-        if self.lot_mark is None or self.pos is None:
-            return None
-        return math.hypot(self.pos[0] - self.lot_mark[0],
-                          self.pos[1] - self.lot_mark[1])
+        return self.dist_from(self.lot_mark)
 
     def lot_watch_heading(self):
         """Whether the robot is now running straight down the corridor (ARX).
@@ -1580,10 +1692,218 @@ class MissionControl(Node):
         # last creep it was given.
         self.set_avoid(True, angular=0.0, linear=0.0)
         self.set_avoid(False)
-        if stopped and self.get_parameter('lot.stop_at_end').value:
+        if not stopped:
+            self.go(STAGE_FOLLOW_SIDE, why)
+        elif self.get_parameter('lot.stop_at_end').value:
             self.stop(f'{why} - stopping here, as asked')
+        elif self.get_parameter('bay.enabled').value:
+            self.go(STAGE_PICK_BAY, f'{why} - reading the bays')
         else:
             self.go(STAGE_FOLLOW_SIDE, why)
+
+    def tick_pick_bay(self, now):
+        """Stand between the two bays and read which one is empty (ARX).
+
+        Standing still, because the reading is a pair of distances to either
+        side and the robot is 0.138 m wide in a column 0.25 m wide: rolling
+        while it reads would change both of them.
+
+        Everything here is the robot's own left and right. Which bay that is
+        on the course depends on which way the robot came in, and it does not
+        need to know - it turns towards the side that is empty.
+        """
+        self.set_driving(True)
+        self.set_follow_side(FOLLOW_AUTO)
+        # Still holding the wheel, at a standstill. Handing back to lane
+        # following here would let it act on a frame with no lane in it.
+        self.set_avoid(True, angular=0.0, linear=0.0)
+        self.set_armed(MISSION_PARKING)
+
+        waited = now - self.stage_since
+        if waited < self.get_parameter('bay.settle_s').value:
+            return
+
+        if self.side is None:
+            if waited > self.get_parameter('bay.give_up_s').value:
+                self.get_logger().warn(
+                    'no report from detect_obstacle at all - it may not be '
+                    'running. Taking the preferred bay unread')
+                self.pick_bay(self.get_parameter('bay.prefer').value,
+                              'nothing was read')
+            return
+
+        left_taken = bool(self.side & SIDE_LEFT)
+        right_taken = bool(self.side & SIDE_RIGHT)
+        prefer = self.get_parameter('bay.prefer').value
+        seen = (f'left {"taken" if left_taken else "clear"}, '
+                f'right {"taken" if right_taken else "clear"}')
+
+        if left_taken and right_taken:
+            # Not a reason to stand there: a run that never moves again ends
+            # at 30 seconds by the rules, and a bay wrongly called taken
+            # costs less than that.
+            self.get_logger().warn(
+                f'both bays read as taken ({seen}) - one of them is a bad '
+                f'reading, taking the {prefer} as set by bay.prefer')
+            self.pick_bay(prefer, seen)
+        elif left_taken:
+            self.pick_bay('right', seen)
+        elif right_taken:
+            self.pick_bay('left', seen)
+        else:
+            self.pick_bay(prefer, f'{seen}, taking the {prefer} as set by bay.prefer')
+
+    def pick_bay(self, side, why):
+        """Settle on a bay and say so (ARX)."""
+        self.bay = side
+        self.get_logger().info(
+            f'bays read: {why} -> parking in the bay on the robot\'s {side}')
+        self.set_avoid(True, angular=0.0, linear=0.0)
+        self.set_avoid(False)
+        if self.get_parameter('bay.stop_after_pick').value:
+            self.stop(f'{side} bay chosen - stopping here, as asked')
+        elif self.get_parameter('bay.park.enabled').value:
+            # Clockwise for the bay on the left, anticlockwise for the one on
+            # the right, so that the bay ends up behind the robot. The exit
+            # arc later turns the same way again, which is what brings it
+            # back to the middle of the column facing out.
+            self.park_way = -1 if side == 'left' else +1
+            self.park_phase = 0
+            self.park_turn = 0.0
+            self.park_last_yaw = None
+            self.park_mark = None
+            self.park_since = None
+            self.go(STAGE_PARK_IN_BAY, f'{side} bay chosen - backing in')
+        else:
+            self.go(STAGE_FOLLOW_SIDE, f'{side} bay chosen')
+
+    def park_swept(self):
+        """Degrees turned since this phase began, accumulated (ARX)."""
+        if self.yaw is None:
+            return 0.0
+        if self.park_last_yaw is not None:
+            self.park_turn += (self.yaw - self.park_last_yaw + 180.0) % 360.0 - 180.0
+        self.park_last_yaw = self.yaw
+        return abs(self.park_turn)
+
+    def park_next(self, why, now):
+        """Start the next phase with its counters cleared (ARX)."""
+        self.park_phase += 1
+        self.park_turn = 0.0
+        self.park_last_yaw = None
+        self.park_mark = self.pos
+        self.park_since = now
+        self.park_ticks = 0
+        self.get_logger().info(f'park phase {self.park_phase} - {why}')
+
+    def tick_park_in_bay(self, now):
+        """Back into the empty bay, stand in it, and drive out again (ARX).
+
+        Five phases, and the whole thing is one direction of turn:
+
+            0 turn 90 on the spot, putting the empty bay behind the robot
+            1 reverse into it
+            2 stand there
+            3 drive out on a quarter circle, turning the same way again
+            4 hold that heading until there is a line to follow
+
+        Reversing in rather than driving in, because the robot has to leave
+        again. Nose-first it would have to reverse out blind down a column
+        0.25 m wide; tail-first the whole exit is one forward arc, and the arc
+        that leaves the bay is the arc that lines it up with the way out.
+
+        The radius is not free. From the left bay's centre at (0.754, 0.754)
+        facing -x, a quarter circle to the right on 0.248 m ends at (0.506,
+        1.002) facing +y: the middle of the mouth, pointed up the corridor.
+        The right bay is the mirror of it and takes the same radius.
+        """
+        self.set_driving(True)
+        self.set_armed(MISSION_NONE)
+        if self.park_since is None:
+            self.park_since = now
+            self.park_mark = self.pos
+
+        way = self.park_way
+        speed = self.get_parameter('bay.park.speed').value
+
+        if self.park_phase == 0:
+            # On the spot. The column is 0.25 m wide and the robot 0.225 m
+            # across its diagonal, so there is no room to turn any other way.
+            self.set_avoid(True, angular=way * self.get_parameter('bay.park.turn_rate').value,
+                           linear=0.0)
+            if self.park_swept() >= self.get_parameter('bay.park.turn_deg').value:
+                self.park_next('reversing into the bay', now)
+
+        elif self.park_phase == 1:
+            self.set_avoid(True, angular=0.0, linear=-speed)
+            want = self.get_parameter(
+                f'bay.park.into_{self.bay}_m').value
+            gone = self.dist_from(self.park_mark)
+            if gone is not None and gone >= want:
+                self.park_next(f'parked, {gone:.3f} m in', now)
+
+        elif self.park_phase == 2:
+            self.set_avoid(True, angular=0.0, linear=0.0)
+            if now - self.park_since >= self.get_parameter('bay.park.hold_s').value:
+                self.park_next('driving out on the arc', now)
+
+        elif self.park_phase == 3:
+            radius = self.get_parameter('bay.park.radius_m').value
+            self.set_avoid(True, angular=way * speed / radius, linear=speed)
+            if self.park_swept() >= self.get_parameter('bay.park.turn_deg').value:
+                if self.get_parameter('bay.park.rejoin').value:
+                    self.lot_heading = self.yaw
+                    self.park_next('holding the way out until a line appears', now)
+                else:
+                    self.finish_park('out of the bay')
+                    return
+
+        elif self.park_phase == 4:
+            # Same P term the approach used, on the heading the arc finished
+            # on. There is no line here for another 50 mm or so.
+            self.set_avoid(True, angular=self.lot_correction(), linear=speed)
+            if self.lane_state not in (None, 0):
+                self.park_ticks += 1
+                if self.park_ticks >= self.get_parameter('bay.park.rejoin_ticks').value:
+                    self.park_next(
+                        f'lane_state {self.lane_state} - following the yellow '
+                        f'line out', now)
+            else:
+                self.park_ticks = 0
+
+        else:
+            # Lane following again, but named: the yellow line, because it is
+            # the one that leads out of the pocket, and not the mean of both,
+            # because there is no white line in here to take a mean with.
+            self.set_avoid(False)
+            self.set_follow_side(FOLLOW_YELLOW)
+            want = self.get_parameter('bay.park.leave_heading_deg').value
+            tol = self.get_parameter('bay.park.leave_tolerance_deg').value
+            if self.yaw is not None:
+                off = abs((self.yaw - want + 180.0) % 360.0 - 180.0)
+                if off <= tol:
+                    self.finish_park(
+                        f'back on the road heading, {off:.0f} deg off {want:+.0f}')
+                    return
+
+        waited = now - self.stage_since
+        if waited > self.get_parameter('bay.park.give_up_s').value:
+            self.get_logger().warn(
+                f'still in phase {self.park_phase} of parking after '
+                f'{waited:.0f} s - giving up and carrying on')
+            self.finish_park('gave up on the bay')
+
+    def finish_park(self, why):
+        """Let go of the wheel and go back to following the road (ARX)."""
+        self.set_avoid(True, angular=0.0, linear=0.0)
+        self.set_avoid(False)
+        where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+        self.get_logger().info(f'parking done: {why}, facing {where}')
+        # follow_side lands on FOLLOW_AUTO by itself here - chosen_side()
+        # returns it whenever the junction never picked a line, which is the
+        # case on any run that reaches the parking lot - so there is nothing
+        # to set.
+        self.go(STAGE_FOLLOW_SIDE, why)
 
     def tick_stopped(self):
         self.set_armed(MISSION_NONE)

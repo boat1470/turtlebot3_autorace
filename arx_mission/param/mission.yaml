@@ -523,10 +523,131 @@
       kp: 0.02
       max_angular: 0.5
 
-      # Stop there. The debug step, like the two sign hunts before it.
-      stop_at_end: true
+      # Off now: the lot is no longer the end of anything, it is where the
+      # bays get read. Set it true to go back to stopping on arrival, which
+      # is still the quickest way to check the approach alone.
+      stop_at_end: false
 
       give_up_s: 60.0
+
+    # --- which bay to park in -------------------------------------------
+    #
+    # Read off /detect/obstacle_side while standing still between the two of
+    # them. That topic is wedges 30 degrees either side of straight left and
+    # straight right against half a metre - the one piece of the 2018
+    # example's detect_parking.py worth keeping. The rest of that file is
+    # dead reckoning (straight 0.45, left 90, straight 1.0) and this package
+    # reaches the same place by following the yellow line instead.
+    #
+    # Everything here is the ROBOT's left and right, never the course's. A
+    # robot facing into the lot has the bay at the larger x on its left, and
+    # naming these after the course is the mistake that once sent the
+    # construction stage into the sign standing beside the track.
+    #
+    # The simulator ships both bays empty, so this can only ever be tested
+    # with full.launch.py's blocked:= argument, which spawns a robot in one:
+    #
+    #     ros2 launch arx_mission full.launch.py start:=mission4 blocked:=right
+    #
+    # Measured standing in the middle column with one bay taken: 0.216 m on
+    # that side against 1.821 m on the empty one, over 24 beams. Nearly a
+    # factor of ten, so the 0.5 m threshold has plenty of room either way.
+    bay:
+      enabled: true
+
+      # Stand still this long before reading. The robot arrives with its own
+      # drift still settling and the scan costs nothing, so there is no
+      # reason to act on the first one.
+      settle_s: 1.0
+
+      # Which to take when both are empty - which in the simulator is every
+      # run that does not use blocked:=. Right, like the example, which
+      # tested its right first.
+      prefer: right
+
+      # Off now: choosing is no longer the end, it is what decides which way
+      # to turn. Set it true to go back to stopping on the decision, which is
+      # still the quickest way to check the reading alone.
+      stop_after_pick: false
+
+      give_up_s: 20.0
+
+      # --- backing into the bay and coming out again --------------------
+      #
+      # Five phases, and the whole thing is one direction of turn:
+      #
+      #   0 turn 90 on the spot, putting the empty bay behind the robot
+      #   1 reverse into it
+      #   2 stand there
+      #   3 drive out on a quarter circle, turning the same way again
+      #   4 hold that heading until there is a line to follow
+      #
+      # Reversing in rather than driving in, because the robot has to leave
+      # again. Nose-first it would have to reverse out blind down a column
+      # 0.25 m wide; tail-first the whole exit is one forward arc, and the
+      # arc that leaves the bay is the arc that lines it up with the way out.
+      park:
+        enabled: true
+
+        # On the spot for the first turn. The column is 0.25 m wide and the
+        # robot 0.225 m across its diagonal, so there is no room for an arc.
+        turn_deg: 90.0
+        turn_rate: 0.6
+
+        speed: 0.04
+
+        # Two distances, not one, because the robot does not stop in the
+        # middle of the column: it stops at x 0.476 against a middle of
+        # 0.506, four runs agreeing to 3.5 mm. The bay centres at x 0.754 and
+        # x 0.258 are therefore 0.278 and 0.218 away. A single figure would
+        # leave 4 mm at one end of a bay with only 68 mm to give.
+        into_left_m: 0.278
+        into_right_m: 0.218
+
+        # Stand still in the bay. Zero is what was asked for; the knob is
+        # here because being seen stopped in it may be what actually scores.
+        hold_s: 0.0
+
+        # The quarter circle out, and it is not a free choice. From the left
+        # bay's centre at (0.754, 0.754) facing -x, turning right through 90
+        # degrees on this radius ends at (0.506, 1.002) facing +y - the
+        # middle of the mouth, pointed up the corridor - so nothing straight
+        # is needed before it or after it. The right bay is its mirror and
+        # takes the same radius.
+        #
+        # omega is speed / radius, 0.161 rad/s, against a wheel ceiling of
+        # 2.25 rad/s at this speed.
+        radius_m: 0.248
+
+        # Creep on the exit heading until detect_lane has something again,
+        # then hand back to it. Without this the wheel goes back at the top
+        # of the arc, where the robot is still inside the pocket and there is
+        # no line for another 50 mm - and a lane follower given a frame with
+        # no lane in it is what sent the robot wandering round this pocket
+        # the first time.
+        rejoin: true
+        rejoin_ticks: 3
+
+        # Then follow the YELLOW line until the robot is pointing back down
+        # the road, and only hand to the mean of both lines there.
+        #
+        # Handing straight to the mean did not work. The robot came up the
+        # corridor correctly to (0.469, 1.624) and then turned past 180 to
+        # -139.7 and drove back down into the pocket. The corridor has a
+        # yellow wall on BOTH sides and no white one, so detect_lane reports
+        # lane_state 1 whichever one it locks onto, and at the top the yellow
+        # it was holding curves away west - the robot followed it round and
+        # went back in.
+        #
+        # Naming the line and the heading takes both guesses out: the yellow
+        # line is what leads out of the pocket onto the road, and 180 is the
+        # road. The exit arc leaves the robot on +90, so it has a 90 degree
+        # left turn to make and the window has to be small enough that it
+        # cannot latch part way round.
+        leave_heading_deg: 180.0
+        leave_tolerance_deg: 20.0
+
+        give_up_s: 90.0
 
     # --- lane following (arx_control_lane) ------------------------------
     control:

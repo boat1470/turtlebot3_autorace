@@ -18,6 +18,7 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'param'), glob('param/*.yaml')),
         (os.path.join('share', package_name, 'image'), glob('image/*')),
+        (os.path.join('share', package_name, 'model'), glob('model/*.sdf')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

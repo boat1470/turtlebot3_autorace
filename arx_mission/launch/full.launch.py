@@ -55,6 +55,7 @@ from launch.actions import (
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 # Where a run may begin (ARX). Each preset is a place to stand and the stage
 # to start in, because either alone is useless: a sequencer told to start at
@@ -122,6 +123,46 @@ PRESETS = {
 }
 
 
+# Where the two parking bays are (ARX), measured off the course texture the
+# same way as everything else in this mission - see notes/track_geometry.py.
+# The pocket runs x 0.135 to 0.877 and y 0.500 to 1.008, split into three
+# columns by dashed lines at x 0.381 and 0.631: a bay, the way in, a bay.
+#
+# Named from the ROBOT's seat, not the course's, so that `blocked:=right` and
+# the `right taken` that comes back on /detect/obstacle_side are the same
+# side. The robot drives in facing -y, so its left is +x: the bay at x 0.754
+# is the one on its left, and the one at x 0.258 is on its right. Nothing in
+# this package names a side after the course - that is the mistake that once
+# drove the construction stage into the sign standing beside the track.
+#
+# It does mean these are only the robot's left and right while it comes in
+# the way this mission does. Anything approaching the pocket from the other
+# end would have them the other way round.
+BAYS = {
+    'left': ('0.754', '0.754'),
+    'right': ('0.258', '0.754'),
+}
+
+
+def block_bay(which):
+    """Put a robot in one of the bays, so the free one has to be found (ARX).
+
+    The simulator ships neither bay occupied, so `which bay is free` has only
+    ever had one answer there and any rule at all would look like it worked.
+
+    Spawned here rather than added to turtlebot3_autorace_2020.world, which
+    belongs to the example: this leaves that file alone, and it means both
+    cases can be run without editing anything.
+    """
+    x, y = BAYS[which]
+    model = os.path.join(get_package_share_directory('arx_mission'),
+                         'model', 'parking_dummy.sdf')
+    return Node(
+        package='ros_gz_sim', executable='create', output='screen',
+        arguments=['-file', model, '-name', f'parking_dummy_{which}',
+                   '-x', x, '-y', y, '-z', '0.0'])
+
+
 def turn_robot(preset):
     """Stand the robot on the preset's heading, after it has spawned (ARX).
 
@@ -183,6 +224,12 @@ def stack(context, *unused_args, **unused_kwargs):
             f'Known: {", ".join(sorted(PRESETS))}')
     preset = PRESETS[start]
 
+    blocked = LaunchConfiguration('blocked').perform(context)
+    if blocked not in BAYS and blocked != 'none':
+        raise RuntimeError(
+            f'blocked:={blocked} is not a bay. '
+            f'Known: none, {", ".join(sorted(BAYS))}')
+
     sim = LaunchConfiguration('sim')
     calibration = LaunchConfiguration('calibration')
     debug_image = LaunchConfiguration('debug_image')
@@ -236,6 +283,10 @@ def stack(context, *unused_args, **unused_kwargs):
         # control_lane is not up until 16 s, and starts held even then.
         *([TimerAction(period=6.0, actions=[turn_robot(preset)])]
           if float(preset['yaw']) else []),
+        # After the robot's own spawn, so the two creates cannot race for the
+        # same world.
+        *([TimerAction(period=7.0, actions=[block_bay(blocked)])]
+          if blocked != 'none' else []),
         TimerAction(period=8.0, actions=camera),
         TimerAction(period=14.0, actions=mission),
         TimerAction(period=16.0, actions=lane),
@@ -247,6 +298,10 @@ def generate_launch_description():
         DeclareLaunchArgument('start', default_value='full',
                               description='Preset to begin from: '
                                           + ', '.join(sorted(PRESETS))),
+        DeclareLaunchArgument('blocked', default_value='none',
+                              description='Park a robot in one of the parking '
+                                          'bays: none, '
+                                          + ', '.join(sorted(BAYS))),
         DeclareLaunchArgument('sim', default_value='true',
                               description='Start the Gazebo simulator too.'),
         DeclareLaunchArgument('calibration', default_value='false',
