@@ -45,6 +45,7 @@ def generate_launch_description():
 
     use_sim_time = LaunchConfiguration('use_sim_time')
     start_stage = LaunchConfiguration('start_stage')
+    spawn_yaw_deg = LaunchConfiguration('spawn_yaw_deg')
 
     args = [
         DeclareLaunchArgument(
@@ -55,6 +56,12 @@ def generate_launch_description():
             description='Stage to begin in. Anything but wait_green skips the '
                         'missions before it. full.launch.py start:=<preset> '
                         'sets this together with where the robot is standing.'),
+        DeclareLaunchArgument(
+            'spawn_yaw_deg', default_value='0.0',
+            description='World heading the robot was placed on. gz odometry '
+                        'starts at zero whatever pose the model is in, so a '
+                        'preset that faces anything but +x has to say so or '
+                        'every heading gate is out by that much.'),
     ]
 
     mission_control = Node(
@@ -73,6 +80,7 @@ def generate_launch_description():
             # command line for one run, not left set in a file where the next
             # person inherits it without knowing.
             {'start_stage': ParameterValue(start_stage, value_type=str)},
+            {'spawn_yaw_deg': ParameterValue(spawn_yaw_deg, value_type=float)},
         ],
     )
 

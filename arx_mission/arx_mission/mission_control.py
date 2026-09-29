@@ -432,6 +432,30 @@ class MissionControl(Node):
 
         self.declare_parameter('rate_hz', 10.0)
 
+        # The world heading the robot is standing at before it moves (ARX).
+        #
+        # gz's DiffDrive integrates its odometry from zero whatever pose the
+        # model was placed in, so /odom yaw is the angle turned since the
+        # start rather than the angle in the world. Every heading.center_deg
+        # here is a world angle, measured off the course, so the two have to
+        # be tied together.
+        #
+        # It has been zero all along only because the example's spawn always
+        # faces +x: spawn_turtlebot3.launch.py passes -x -y -z and no yaw at
+        # all. A preset that stands the robot somewhere facing another way
+        # has to say which way. Measured, not assumed - rotating the model
+        # with gz's set_pose service from yaw -3.130 to 0.000 left /odom's
+        # quaternion identical to twelve decimal places.
+        self.declare_parameter('spawn_yaw_deg', 0.0)
+        # Read once. It describes where the robot was put, not a knob to
+        # turn, and a run cannot change it without respawning.
+        self.spawn_yaw = float(self.get_parameter('spawn_yaw_deg').value)
+        if self.spawn_yaw:
+            self.get_logger().warn(
+                f'odom yaw is offset by {self.spawn_yaw:+.1f} deg - the robot '
+                f'was placed facing that way, and heading gates are in world '
+                f'angles')
+
         # Which stage a run begins in (ARX). The default is the whole course
         # from the start line; anything else skips the missions before it and
         # is for testing one mission without driving to it first, which took
@@ -597,9 +621,14 @@ class MissionControl(Node):
     def on_odom(self, msg):
         """Track the robot's heading, in degrees, -180 to 180, and where it is."""
         q = msg.pose.pose.orientation
-        self.yaw = math.degrees(math.atan2(
+        yaw = math.degrees(math.atan2(
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y * q.y + q.z * q.z)))
+        # Back into world angles. Zero for every run that starts on the start
+        # line, so this changes nothing that was measured before it - see
+        # spawn_yaw_deg. Wrapped, because a window straddling +/-180 is the
+        # normal case here rather than the odd one.
+        self.yaw = (yaw + self.spawn_yaw + 180.0) % 360.0 - 180.0
         # Position is only ever used as a difference over a few tens of
         # centimetres, which is what odometry from wheels is good at: over a
         # whole course it came out 2.5 cm from where the simulator said the

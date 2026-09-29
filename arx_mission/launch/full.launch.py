@@ -39,12 +39,14 @@ gzclient unconditionally and takes no argument for it, so offering the option
 here would be a lie. Run the simulator separately if a headless one is needed.
 """
 
+import math
 import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     IncludeLaunchDescription,
     OpaqueFunction,
     SetLaunchConfiguration,
@@ -66,11 +68,18 @@ from launch.substitutions import LaunchConfiguration
 # LaunchConfiguration('x_pose', default='0.8'), which picks up whatever this
 # scope has already set.
 #
-# There is no yaw. spawn_turtlebot3.launch.py passes -x -y -z to
-# `ros_gz_sim create` and nothing else, so the yaw_pose the example sets has
-# never had any effect and the robot always spawns facing +x. Measured, not
-# assumed. Every preset therefore has to be somewhere that facing +x is a
-# reasonable heading to begin from.
+# `yaw` is in degrees, and is not part of the spawn. spawn_turtlebot3.
+# launch.py passes -x -y -z to `ros_gz_sim create` and nothing else, so the
+# yaw_pose the example sets has never had any effect and the robot always
+# comes up facing +x. A preset that needs another heading is turned on the
+# spot afterwards, with gz's own set_pose service - see turn_robot below.
+#
+# That turn is invisible to odometry: gz's DiffDrive integrates from zero
+# whatever pose the model is in, so /odom keeps reading the heading the robot
+# was spawned at. Measured - rotating the model from yaw -3.130 to 0.000 left
+# /odom's quaternion identical to twelve decimal places. mission_control's
+# heading gates are world angles, so the same number is handed to it as
+# spawn_yaw_deg and added back on.
 PRESETS = {
     # The start line, with the traffic light ahead. The numbers are the
     # example's own defaults, repeated so that `full` is described in the
@@ -79,6 +88,7 @@ PRESETS = {
         'stage': 'wait_green',
         'x': '0.8',
         'y': '-1.747',
+        'yaw': '0.0',
     },
     # Where a full run ends up once the construction board has been read:
     # measured at (0.581, 0.252) facing +1.6 degrees. Close enough to the
@@ -88,8 +98,60 @@ PRESETS = {
         'stage': 'drive_to_construction',
         'x': '0.58',
         'y': '0.25',
+        'yaw': '0.0',
+    },
+    # Where a mission3 run ends up once the parking board has been read and
+    # the robot has stopped at it: measured at (1.2797, 1.7449) facing
+    # -179.3 degrees. That is the middle of the lane - white at y 1.879,
+    # yellow at 1.625 - with 0.54 m still to go to the board at x 0.74 and
+    # 0.77 m to the mouth of the lot at x 0.506.
+    #
+    # It is the first preset that needs a heading of its own. Everything up
+    # to here has been driven in +x.
+    'mission4': {
+        'stage': 'drive_to_parking',
+        'x': '1.28',
+        'y': '1.745',
+        'yaw': '180.0',
     },
 }
+
+
+def turn_robot(preset):
+    """Stand the robot on the preset's heading, after it has spawned (ARX).
+
+    `ros_gz_sim create` is given no yaw by the example's spawn, so the only
+    way to face another direction is to turn the model afterwards. gz's
+    set_pose service takes a whole pose, so the position goes back in
+    unchanged - the spawn has already put it there, and repeating it means
+    the robot cannot creep away while the stack is still coming up.
+
+    It is retried because there is no ordering between this and the spawn
+    that launch can express: the service exists as soon as the server does,
+    and answers `false` until the model is in the world. Reading the pose
+    back is what says it worked; a run that started on the wrong heading
+    would otherwise look like a driving fault.
+    """
+    world = 'default'  # <world name='default'> in turtlebot3_autorace_2020.world
+    name = os.environ.get('TURTLEBOT3_MODEL', 'burger_cam')
+    yaw = math.radians(float(preset['yaw']))
+    script = f'''
+for i in $(seq 1 20); do
+  gz service -s /world/{world}/set_pose \\
+    --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --timeout 2000 \\
+    --req 'name: "{name}", position: {{x: {preset['x']}, y: {preset['y']}, z: 0.01}},
+           orientation: {{z: {math.sin(yaw / 2):.9f}, w: {math.cos(yaw / 2):.9f}}}' \\
+    2>/dev/null | grep -q 'data: true' && {{
+      echo "[arx] standing {name} at ({preset['x']}, {preset['y']}) facing {preset['yaw']} deg"
+      gz model -m {name} -p 2>/dev/null | tail -2
+      exit 0
+  }}
+  sleep 1
+done
+echo "[arx] COULD NOT TURN {name} - the run is on the wrong heading" >&2
+exit 1
+'''
+    return ExecuteProcess(cmd=['bash', '-c', script], output='screen')
 
 
 def include(package, launch_file, condition=None, **kwargs):
@@ -140,7 +202,8 @@ def stack(context, *unused_args, **unused_kwargs):
 
     mission = [
         include('arx_mission', 'mission_control.launch.py',
-                start_stage=preset['stage']),
+                start_stage=preset['stage'],
+                spawn_yaw_deg=preset['yaw']),
         # Both detectors idle until mission_control arms them, so their
         # position in the order only has to be after the camera pipeline.
         include('arx_mission', 'traffic_light.launch.py'),
@@ -161,6 +224,13 @@ def stack(context, *unused_args, **unused_kwargs):
         SetLaunchConfiguration('x_pose', preset['x']),
         SetLaunchConfiguration('y_pose', preset['y']),
         simulator,
+        # Only when there is something to turn, so a preset that faces +x
+        # runs exactly as it did before this existed - the spawn already
+        # puts the robot there, and a teleport that changes nothing is still
+        # a teleport. After the spawn and well before anything can drive:
+        # control_lane is not up until 16 s, and starts held even then.
+        *([TimerAction(period=6.0, actions=[turn_robot(preset)])]
+          if float(preset['yaw']) else []),
         TimerAction(period=8.0, actions=camera),
         TimerAction(period=14.0, actions=mission),
         TimerAction(period=16.0, actions=lane),
