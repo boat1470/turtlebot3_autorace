@@ -133,7 +133,36 @@
       window: 7
       confirm_votes: 5
 
-      vote_max_age_s: 3.0
+      # Six seconds, against the intersection's three, because the two are
+      # read under different conditions. The arrow is read while the robot
+      # is driving straight at the board with it square in frame; the
+      # construction board is passed side-on while the robot hugs a lane
+      # line, so it is only worth looking at for a few seconds.
+      #
+      # Measured on a full run that failed to confirm:
+      #
+      #   t+0.00  4 inliers
+      #   t+1.72  5 inliers
+      #   t+1.84  5 inliers
+      #   t+4.89  5 inliers
+      #
+      # Four reports over 4.9 s, and at a three second window the most that
+      # were ever fresh together was three - the fourth arrived as the first
+      # three were expiring, so the count could not reach five however long
+      # the robot drove. It gave up at 120 s having seen the board four
+      # times. Six seconds holds all four.
+      #
+      # The same reports confirm in 3.5 s from the mission3 preset, where
+      # the robot starts parked 0.47 m in front of the board. Nothing is
+      # wrong with the detector - the window was shorter than the time the
+      # board spends in view.
+      #
+      # What it costs: a stale vote survives twice as long, so the robot
+      # travels 0.42 m rather than 0.21 m at 0.07 m/s before a report stops
+      # counting. Acceptable while confirm_votes is still 5 - the honest
+      # alternative was lowering that, which buys the same pass by
+      # believing less evidence.
+      vote_max_age_s: 6.0
 
       # Stop where the sign was found. The debug step from while the
       # detection was being trusted. Off now that there is a stage after it.
