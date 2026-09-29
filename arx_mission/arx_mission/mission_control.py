@@ -102,6 +102,7 @@ STAGE_DRIVE_TO_CONSTRUCTION = 'drive_to_construction'
 STAGE_AVOID_CONSTRUCTION = 'avoid_construction'
 STAGE_EDGE_PAST_BOARD = 'edge_past_board'
 STAGE_DRIVE_TO_PARKING = 'drive_to_parking'
+STAGE_DRIVE_TO_LOT = 'drive_to_lot'
 
 # /detect/lane_state, from detect_lane: which line it is steering by.
 LANE_STATE_FOR_SIDE = {FOLLOW_YELLOW: 1, FOLLOW_WHITE: 3}
@@ -121,6 +122,7 @@ STAGES = frozenset({
     STAGE_AVOID_CONSTRUCTION,
     STAGE_EDGE_PAST_BOARD,
     STAGE_DRIVE_TO_PARKING,
+    STAGE_DRIVE_TO_LOT,
     STAGE_STOPPED,
 })
 
@@ -430,6 +432,63 @@ class MissionControl(Node):
         # 5 a frame, so 50 is about ten frames of having seen it.
         self.declare_parameter('parking.min_reliability', 50)
 
+        # The parking lot itself (ARX). Measured off the course texture, which
+        # is an exact map of the track - see notes/track_geometry.py:
+        #
+        #   main road        white y 1.879, yellow y 1.625
+        #   yellow line      stops at x 0.631 and starts again at x 0.381
+        #   pocket mouth     x 0.39 to 0.62 at y 1.008, so 0.23 m wide
+        #   pocket           x 0.135 to 0.877, y 0.500 to 1.008
+        #   two bays         x 0.631-0.877 and x 0.135-0.381, 0.246 m each,
+        #                    split off a middle column that is the way in
+        #
+        # Nothing marks the turn-in. traffic_pl_left, the only other board
+        # there, stands at (0.50, 1.90) turned to face -y, which is the robot
+        # coming back OUT of the pocket - it is the exit sign, not the
+        # entrance. What does mark the entrance is the gap in the yellow
+        # line, which is the same thing the mouth is.
+        self.declare_parameter('lot.enabled', True)
+        # How many ticks of lane_state 0 count as the yellow line having run
+        # out. detect_lane publishes at about the rate this ticks, so three
+        # is roughly a third of a second - 13 mm at the speed below.
+        self.declare_parameter('lot.confirm_ticks', 3)
+        # How far to carry on after that, straight.
+        self.declare_parameter('lot.lead_m', 0.30)
+        # Driven by this node rather than by lane following, so it needs its
+        # own speed. The same creep the construction swings use.
+        self.declare_parameter('lot.speed', 0.04)
+        # Take the wheel as soon as the robot is running straight down the
+        # corridor, rather than waiting for the yellow line to end.
+        #
+        # Waiting cost 16 degrees, measured: the robot held x 0.486 on -89.8
+        # for seconds, and then over the last 0.13 m - while the line was
+        # ending but before lane_state would admit it - lane following swung
+        # it to -77.4 and carried it out to x 0.553. Correcting afterwards
+        # got the heading back, but only after the swing had happened.
+        #
+        # There is nothing lost by taking it early. The corridor is straight,
+        # so lane following has no work to do in it; every steering command
+        # it gives there is either noise or, at the end, wrong.
+        #
+        # Two conditions, because either alone is wrong. The turn is what
+        # says the robot is in the corridor at all - the road before it is
+        # just as straight, and holding a heading there would drive past the
+        # entrance. The steadiness is what says the turn is finished.
+        self.declare_parameter('lot.turn_in_deg', 60.0)
+        # Steady means the heading has stayed inside this band for this many
+        # ticks. Measured: the swing through the turn is tens of degrees, the
+        # corridor run holds to under half a degree a second, and one second
+        # of odometry is quiet enough to tell them apart without a rate
+        # estimate - which at 10 Hz is mostly noise.
+        self.declare_parameter('lot.steady_ticks', 10)
+        self.declare_parameter('lot.steady_band_deg', 2.0)
+        # rad/s of correction per degree of error, and its ceiling. Holding
+        # rather than recovering now, so the errors it sees are small.
+        self.declare_parameter('lot.kp', 0.02)
+        self.declare_parameter('lot.max_angular', 0.5)
+        self.declare_parameter('lot.stop_at_end', True)
+        self.declare_parameter('lot.give_up_s', 60.0)
+
         self.declare_parameter('rate_hz', 10.0)
 
         # The world heading the robot is standing at before it moves (ARX).
@@ -554,6 +613,17 @@ class MissionControl(Node):
         self.zone_done = False
         self.corridor_yaw = None
         self.pos = None
+        # The parking lot. Whether the yellow line has been solidly in view
+        # in this stage yet, and where the robot was standing when it ran
+        # out - which is the gap that is the pocket's mouth.
+        self.lot_gone_ticks = 0
+        self.lot_mark = None
+        # The heading the corridor is being run on, once the robot has
+        # settled onto one, and the window it is judged from.
+        self.lot_heading = None
+        self.lot_recent = deque(maxlen=60)
+        self.lot_turn = 0.0
+        self.lot_last_yaw = None
 
         self.pub_armed = self.create_publisher(UInt8, '/arx/armed_mission', 1)
         # Republished every tick. Idempotent, and it means a control_lane
@@ -812,6 +882,8 @@ class MissionControl(Node):
             self.tick_edge_past_board(now)
         elif self.stage == STAGE_DRIVE_TO_PARKING:
             self.tick_drive_to_parking(now)
+        elif self.stage == STAGE_DRIVE_TO_LOT:
+            self.tick_drive_to_lot(now)
         else:
             self.tick_stopped()
 
@@ -1351,6 +1423,8 @@ class MissionControl(Node):
                 f'heading, lines yellow {self.yellow_ok} white {self.white_ok})')
             if self.get_parameter('parking.stop_after_detect').value:
                 self.stop('parking sign - stopping here, as asked')
+            elif self.get_parameter('lot.enabled').value:
+                self.go(STAGE_DRIVE_TO_LOT, 'parking sign read - on to the lot')
             else:
                 self.go(STAGE_FOLLOW_SIDE, 'parking sign read')
             return
@@ -1370,6 +1444,146 @@ class MissionControl(Node):
                 f'white {self.white_ok}, '
                 f'last {len(recent)}: {recent}) - carrying on')
             self.go(STAGE_FOLLOW_SIDE, 'gave up on the parking sign')
+
+    def lot_gone(self):
+        """Metres travelled since the mouth came into view, or None (ARX)."""
+        if self.lot_mark is None or self.pos is None:
+            return None
+        return math.hypot(self.pos[0] - self.lot_mark[0],
+                          self.pos[1] - self.lot_mark[1])
+
+    def lot_watch_heading(self):
+        """Whether the robot is now running straight down the corridor (ARX).
+
+        Accumulated turn, not a difference of headings, for the reason given
+        on turn_accum: the corridor heading is near -90 and the road before
+        it near 180, and a difference wraps.
+        """
+        if self.yaw is None:
+            return False
+        if self.lot_last_yaw is not None:
+            self.lot_turn += (self.yaw - self.lot_last_yaw + 180.0) % 360.0 - 180.0
+        self.lot_last_yaw = self.yaw
+        if abs(self.lot_turn) < self.get_parameter('lot.turn_in_deg').value:
+            # Still on the road or still turning into the corridor. The
+            # window is kept clear so the tick the turn finishes on cannot be
+            # called steady on the strength of readings from before it.
+            self.lot_recent.clear()
+            return False
+
+        self.lot_recent.append(self.yaw)
+        need = self.get_parameter('lot.steady_ticks').value
+        if len(self.lot_recent) < need:
+            return False
+        window = list(self.lot_recent)[-need:]
+        if max(window) - min(window) > self.get_parameter('lot.steady_band_deg').value:
+            return False
+        self.lot_heading = sum(window) / len(window)
+        return True
+
+    def lot_correction(self):
+        """How hard to steer back onto the corridor heading (ARX)."""
+        if self.lot_heading is None or self.yaw is None:
+            return 0.0
+        err = (self.lot_heading - self.yaw + 180.0) % 360.0 - 180.0
+        cap = self.get_parameter('lot.max_angular').value
+        return max(-cap, min(cap, self.get_parameter('lot.kp').value * err))
+
+    def tick_drive_to_lot(self, now):
+        """Follow the yellow line into the parking lot, then a little further (ARX).
+
+        Nothing has to be aimed at. The yellow line turns north off the road
+        at x 0.631 and runs down both walls of the way in, so a robot steering
+        by it drives itself through the mouth and down the middle of the
+        corridor - measured at x 0.4855 against a corridor of x 0.381 to
+        0.631, twice, agreeing to a millimetre. That is also why the steering
+        changes to yellow here, which no stage before this one does.
+
+        It ends where the yellow line does. At y 1.008 the walls stop being
+        yellow and become the white dashes that divide the two bays, and
+        detect_lane has nothing left to follow.
+
+        lane_state is what says so, rather than the yellow reliability: it
+        went to 0 at y 1.040 on both runs and was 1 at every sample before
+        that, all the way from x 1.28. The reliability cannot be used for
+        this - it collapses at x 1.0 out on the road, half a metre early,
+        because the line slides out of the rows the mask counts rather than
+        because the line stops.
+
+        Steering is taken off lane following at the same moment. lane_state 0
+        is exactly the case where detect_lane stops publishing /detect/lane
+        at all, so control_lane would be left acting on whatever it was given
+        last - which is what sent the robot wandering round the pocket when
+        this stage was first run without an end.
+        """
+        self.set_driving(True)
+        self.set_armed(MISSION_NONE)
+
+        if self.lot_heading is None:
+            # Lane following, steering by the yellow line, all the way round
+            # the turn and into the corridor.
+            self.set_avoid(False)
+            self.set_follow_side(FOLLOW_YELLOW)
+            if self.lot_watch_heading():
+                self.get_logger().info(
+                    f'straight down the corridor on {self.lot_heading:+.1f} deg '
+                    f'after turning {self.lot_turn:+.0f} - holding it from here')
+        else:
+            # Holding it. The corridor is straight and the yellow line is
+            # about to end, so there is nothing lane following can add.
+            self.set_avoid(True, angular=self.lot_correction(),
+                           linear=self.get_parameter('lot.speed').value)
+
+        # Watched the whole time, whoever is steering: detect_lane keeps
+        # working out lane_state regardless of who has the wheel.
+        if self.lot_mark is None:
+            if self.lane_state == 0:
+                self.lot_gone_ticks += 1
+                if self.lot_gone_ticks >= self.get_parameter('lot.confirm_ticks').value:
+                    self.lot_mark = self.pos
+                    where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+                    self.get_logger().info(
+                        f'yellow line has run out - the white dashes start '
+                        f'here, facing {where}. Carrying on '
+                        f'{self.get_parameter("lot.lead_m").value:.2f} m')
+            else:
+                # Consecutive, not cumulative: one stray frame is not the end
+                # of the line.
+                self.lot_gone_ticks = 0
+        else:
+            gone = self.lot_gone()
+            if gone is not None and gone >= self.get_parameter('lot.lead_m').value:
+                where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+                self.get_logger().info(
+                    f'in the parking lot after {gone:.2f} m, facing {where}')
+                self.finish_lot('in the parking lot')
+                return
+
+        waited = now - self.stage_since
+        if waited > self.get_parameter('lot.give_up_s').value:
+            # Three different faults look the same from here: a robot that
+            # never settled into the corridor, one that did and never reached
+            # the end of the yellow line, and one that did and never covered
+            # the lead.
+            state = ('never settled into the corridor' if self.lot_heading is None
+                     else 'yellow line never ran out' if self.lot_mark is None
+                     else f'{self.lot_gone():.2f} m of the lead done')
+            self.get_logger().warn(
+                f'not in the parking lot after {waited:.0f} s '
+                f'(turned {self.lot_turn:+.0f} deg, lane_state '
+                f'{self.lane_state}, {state}) - carrying on')
+            self.finish_lot('gave up on the parking lot', stopped=False)
+
+    def finish_lot(self, why, stopped=True):
+        """Let go of the wheel, and stop or carry on (ARX)."""
+        # One zero command first, so control_lane is not left relaying the
+        # last creep it was given.
+        self.set_avoid(True, angular=0.0, linear=0.0)
+        self.set_avoid(False)
+        if stopped and self.get_parameter('lot.stop_at_end').value:
+            self.stop(f'{why} - stopping here, as asked')
+        else:
+            self.go(STAGE_FOLLOW_SIDE, why)
 
     def tick_stopped(self):
         self.set_armed(MISSION_NONE)

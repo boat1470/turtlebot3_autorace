@@ -371,9 +371,10 @@
       # is passed side-on while the robot drives, not stared at.
       vote_max_age_s: 6.0
 
-      # Stop where the sign was found. The debug step - nothing is built on
-      # top of it yet.
-      stop_after_detect: true
+      # Off now: the sign is no longer the end of anything, it is what sends
+      # the robot on to the lot. Set it true to go back to stopping at the
+      # board, which is still the quickest way to check the sign alone.
+      stop_after_detect: false
 
       give_up_s: 120.0
 
@@ -420,6 +421,112 @@
       # a frame, so 50 is about ten frames of having seen it - a second or
       # so at the rate detect_lane publishes.
       min_reliability: 50
+
+    # --- the parking lot itself -----------------------------------------
+    #
+    # Measured off the course texture, which is an exact map of the track -
+    # see notes/track_geometry.py:
+    #
+    #   main road      white y 1.879, yellow y 1.625
+    #   yellow line    stops at x 0.631 and starts again at x 0.381
+    #   pocket mouth   x 0.39 to 0.62 at y 1.008, so 0.23 m across
+    #   pocket         x 0.135 to 0.877, y 0.500 to 1.008
+    #   two bays       x 0.631-0.877 and x 0.135-0.381, 0.246 m each, either
+    #                  side of a middle column that is the way in
+    #
+    # The robot is 0.138 m wide, so the mouth leaves 46 mm either side.
+    #
+    # Nothing marks the turn-in. traffic_pl_left, the only other board there,
+    # stands at (0.50, 1.90) turned to face -y, which is the robot coming
+    # back out of the pocket - it is the exit sign. The gap in the yellow
+    # line is the mouth, so the gap is the cue.
+    #
+    # This stage steers by the yellow line, which no stage before it does.
+    # The pocket is on that side: driving towards -x puts the lower y on the
+    # robot's left, and the yellow line and the mouth are both over there.
+    lot:
+      enabled: true
+
+      # The end of the yellow line, read off /detect/lane_state.
+      #
+      # lane_state and not the yellow reliability. Measured over two runs:
+      # lane_state was 1 at every sample from x 1.28 all the way in, and went
+      # to 0 at y 1.040 - 32 mm past the mouth at y 1.008, where the yellow
+      # walls become the white dashes. The reliability cannot be used for
+      # this: it collapses at x 1.0 out on the road, half a metre early,
+      # because the line slides out of the rows the mask counts rather than
+      # because the line stops.
+      #
+      # Three ticks of it, not one. detect_lane publishes at about the rate
+      # mission_control ticks, so this is a third of a second - 13 mm at the
+      # speed below.
+      confirm_ticks: 3
+
+      # How far to carry on after that, straight, to reach the middle of the
+      # two bays.
+      #
+      # What it is measured from is not the mouth. lane_state went to 0 at
+      # y 1.05, 1.07 and 1.089 over three runs - 40 to 80 mm BEFORE the mouth
+      # at y 1.008 - because it is the yellow walls running out of the mask
+      # that trips it, not the robot arriving anywhere. So the base is
+      # y 1.07, and the bays' middle at y 0.754 is 0.32 from it. Checked
+      # against the spread rather than the mean:
+      #
+      #   base 1.089  stops at y 0.789   35 mm short of the middle
+      #   base 1.070            0.770   16 mm short
+      #   base 1.050            0.750    4 mm past
+      #
+      # Turned 90 degrees into a bay the robot is 0.138 m across, so the
+      # worst of those leaves 181 mm behind it and 189 mm in front, in a bay
+      # 0.508 m deep.
+      lead_m: 0.30
+
+      # mission_control drives this bit itself - lane_state 0 is exactly the
+      # case where detect_lane stops publishing /detect/lane, so there is
+      # nothing for control_lane to steer by. Left to itself it acts on
+      # whatever it was given last, which is what sent the robot wandering
+      # round the pocket and back out the way it came the first time this
+      # stage ran without an end.
+      speed: 0.04
+
+      # Take the wheel as soon as the robot is running straight down the
+      # corridor, rather than waiting for the yellow line to end.
+      #
+      # Waiting cost 16 degrees, measured twice. The robot held x 0.486 on
+      # -89.8 for seconds, and then over the last 0.13 m - while the line was
+      # ending but before lane_state would admit it - lane following swung it
+      # to -77.4 and carried it out to x 0.553. Correcting afterwards got the
+      # heading back, but only after the swing had happened.
+      #
+      # Nothing is lost by taking it early: the corridor is straight, so lane
+      # following has no work to do in it, and every steering command it
+      # gives there is either noise or, at the end, wrong.
+      #
+      # Two conditions, because either alone is wrong. The turn says the
+      # robot is in the corridor at all - the road before it is just as
+      # straight, and holding a heading there would drive straight past the
+      # entrance. The steadiness says the turn has finished.
+      turn_in_deg: 60.0
+
+      # Steady means the heading stayed inside this band for this many ticks.
+      # The swing through the turn is tens of degrees and the corridor run
+      # holds to under half a degree a second, so one second of odometry
+      # tells them apart without a rate estimate - which at 10 Hz is mostly
+      # noise.
+      steady_ticks: 10
+      steady_band_deg: 2.0
+
+      # rad/s of correction per degree of error, and its ceiling. Holding
+      # rather than recovering now, so the errors it sees are small. The
+      # wheels would take 2.25 rad/s at this speed, so the cap is what limits
+      # it, not them.
+      kp: 0.02
+      max_angular: 0.5
+
+      # Stop there. The debug step, like the two sign hunts before it.
+      stop_at_end: true
+
+      give_up_s: 60.0
 
     # --- lane following (arx_control_lane) ------------------------------
     control:

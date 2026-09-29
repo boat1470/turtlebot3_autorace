@@ -106,10 +106,15 @@ PRESETS = {
     # yellow at 1.625 - with 0.54 m still to go to the board at x 0.74 and
     # 0.77 m to the mouth of the lot at x 0.506.
     #
+    # It starts in drive_to_lot rather than drive_to_parking, which is where
+    # the robot was standing: drive_to_parking is mission 3's last stage, and
+    # beginning there would hunt the parking board a second time. The point
+    # of the preset is to be past that.
+    #
     # It is the first preset that needs a heading of its own. Everything up
     # to here has been driven in +x.
     'mission4': {
-        'stage': 'drive_to_parking',
+        'stage': 'drive_to_lot',
         'x': '1.28',
         'y': '1.745',
         'yaw': '180.0',
