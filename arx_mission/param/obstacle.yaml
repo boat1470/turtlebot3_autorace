@@ -60,3 +60,13 @@
       # own. Never for a real run - the rules allow props on the course that
       # belong to no mission.
       always_on: false
+
+      # ARX: the wedge straight ahead reported as a distance on
+      # /detect/front_range. Wide, because what it has to catch is the mouth
+      # of the tunnel, and the walls that mark it stand off to both sides of
+      # the gap the robot is aiming at rather than square in front of it.
+      #
+      # The narrow box on /detect/obstacle asks "can I carry on", which is the
+      # construction zone's question. This one asks how far, because what
+      # wants it is a decision about when to stop steering by the lane.
+      front_angle_deg: 45.0

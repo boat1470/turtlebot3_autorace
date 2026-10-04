@@ -56,11 +56,13 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Float32
 from std_msgs.msg import UInt8
 
 # ARX: must match mission_control.py.
 MISSION_CONSTRUCTION = 3
 MISSION_PARKING = 4
+MISSION_TUNNEL = 6
 
 # ARX: the published bitmask, relative to the robot rather than to the
 # corridor. The first version named the bits after halves of the corridor
@@ -96,9 +98,35 @@ BLOCKED_RIGHT = 4
 # the 2018 example did - turtlebot3_autorace_detect/detect_parking.py scans
 # beams 60 to 120 and 240 to 300 against 0.5 m - and that part of it is
 # sound, unlike its dead-reckoned approach.
+#
+# The tunnel uses the same report for a different question. Driving up to it
+# the sides are empty; from the mouth inwards there is wall on both, and the
+# near one sits at a flat 0.120 m over sixty beams. Measured:
+#
+#   outside, y +0.60    left 1.081   right nothing
+#   outside, y +0.20    left 0.673   right nothing
+#   the mouth, y -0.10  left 0.169   right 0.120
+#   inside,  y -0.35    left 0.355   right 0.120
+#
+# Which is why there is no upward range finder on this robot for the tunnel:
+# a sensor has to live inside the model, that model belongs to the example,
+# and gz's DetachableJoint has to be declared in the parent model too - so
+# adding one would mean forking the robot and both of its launch files. The
+# LiDAR already answers the question, and answers it without depending on
+# the light.
 SIDE_CLEAR = 0
 SIDE_LEFT = 1
 SIDE_RIGHT = 2
+
+# ARX: the third report, on /detect/front_range: the nearest thing in a wide
+# wedge straight ahead, in metres. Published as a distance rather than a bit
+# because what wants it is a decision about when to stop steering by the lane
+# and go straight - and that is a question about how far, not whether.
+#
+# Wide, at 45 degrees either side, because the thing it has to catch is the
+# mouth of the tunnel, and the walls that mark it are off to both sides of
+# the gap rather than square in front.
+RANGE_NONE = 9.9
 
 
 class DetectObstacle(Node):
@@ -125,6 +153,7 @@ class DetectObstacle(Node):
         # robot fills about 24 of them, so asking for 3 costs nothing and
         # keeps a single stray return from choosing the bay.
         self.declare_parameter('obstacle.side_min_points', 3)
+        self.declare_parameter('obstacle.front_angle_deg', 45.0)
         self.declare_parameter('obstacle.frame_skip', 1)
         self.declare_parameter('obstacle.publish_debug_image', True)
         self.declare_parameter('obstacle.always_on', False)
@@ -133,6 +162,7 @@ class DetectObstacle(Node):
         self.counter = 1
         self.blocked = None
         self.side = None
+        self.front = None
 
         self.create_subscription(LaserScan, '/scan', self.lidar_callback, 10)
         # ARX: the gate every detector in this package has. A scan costs far
@@ -143,6 +173,7 @@ class DetectObstacle(Node):
 
         self.pub_obstacle = self.create_publisher(UInt8, '/detect/obstacle', 10)
         self.pub_side = self.create_publisher(UInt8, '/detect/obstacle_side', 10)
+        self.pub_front = self.create_publisher(Float32, '/detect/front_range', 10)
         self.pub_image = self.create_publisher(
             CompressedImage, '/detect/image_output/compressed', 10)
 
@@ -160,7 +191,8 @@ class DetectObstacle(Node):
         """Whether this detector should be looking at all (ARX)."""
         if self.get_parameter('obstacle.always_on').value:
             return True
-        return self.armed in (MISSION_CONSTRUCTION, MISSION_PARKING)
+        return self.armed in (MISSION_CONSTRUCTION, MISSION_PARKING,
+                              MISSION_TUNNEL)
 
     def lidar_callback(self, msg):
         # ARX: with nothing to look for, no work is done at all.
@@ -177,6 +209,7 @@ class DetectObstacle(Node):
         points = self.convert_laserscan_to_points(msg)
         blocked = self.fnBlocked(points)
         side = self.fnBlockedSide(msg)
+        front = self.fnFrontRange(msg)
 
         # ARX: published every scan, not only on a change. mission_control
         # reads the latest value each tick, and a node that comes up late
@@ -189,6 +222,19 @@ class DetectObstacle(Node):
         out_side = UInt8()
         out_side.data = side
         self.pub_side.publish(out_side)
+
+        out_front = Float32()
+        out_front.data = front
+        self.pub_front.publish(out_front)
+
+        # Logged in 5 cm steps, not on every change: it is a distance from a
+        # moving robot, so it changes on every scan and a log of that is
+        # unreadable.
+        step = None if front >= RANGE_NONE else round(front / 0.05)
+        if step != self.front:
+            self.front = step
+            if step is not None:
+                self.get_logger().info(f'ahead -> {front:.3f} m')
 
         if blocked != self.blocked:
             self.blocked = blocked
@@ -280,6 +326,25 @@ class DetectObstacle(Node):
         if np.count_nonzero(near & (np.abs(deg + 90.0) <= half)) >= need:
             side |= SIDE_RIGHT
         return side
+
+    def fnFrontRange(self, msg):
+        """Nearest return in a wide wedge straight ahead, in metres (ARX).
+
+        Wide on purpose. The narrow box on /detect/obstacle asks "can I carry
+        on", which is the construction zone's question; this one has to notice
+        the mouth of a corridor, whose walls stand off to both sides of the
+        gap the robot is aiming at rather than square in front of it.
+        """
+        n = len(msg.ranges)
+        if n == 0:
+            return RANGE_NONE
+        half = self.get_parameter('obstacle.front_angle_deg').value
+        angles = np.linspace(msg.angle_min, msg.angle_max, n)
+        ranges = np.array(msg.ranges)
+        ok = (ranges >= msg.range_min) & (ranges <= msg.range_max)
+        deg = (np.degrees(angles) + 180.0) % 360.0 - 180.0
+        sel = ok & (np.abs(deg) <= half)
+        return float(ranges[sel].min()) if np.any(sel) else RANGE_NONE
 
     def fnSideRanges(self, msg):
         """Nearest return in each side wedge, as text, for the log (ARX).

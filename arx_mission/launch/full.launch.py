@@ -15,6 +15,12 @@ Arguments:
                         other preset stands the robot where that mission
                         begins and tells the sequencer to start in its stage,
                         so the missions before it never run. See PRESETS.
+    roof:=false         leave the tunnel open to the sky. On by default -
+                        the world has walls but no roof, so the camera can
+                        still see the lane lines in there. See build_roof.
+    blocked:=left|right park a robot in one of the two parking bays, so that
+                        choosing the empty one has something to choose. The
+                        simulator ships both of them empty.
     sim:=false          attach to an already running simulator, or to the
                         real robot
     calibration:=true   bring detect_lane up in calibration mode, which turns
@@ -120,6 +126,35 @@ PRESETS = {
         'y': '1.745',
         'yaw': '180.0',
     },
+    # Twenty centimetres before the stop board at (-1.35, 1.04), on the lane
+    # that leads to the level crossing: white at y 1.129, yellow at y 1.387,
+    # so the middle is y 1.258. The bar is another 0.50 m further on, at
+    # (-0.85, 1.26).
+    #
+    # Facing +x, so no turn is needed - this is the direction the crossing is
+    # approached from, which the bar's own plugin agrees with
+    # (approach_side: -1).
+    #
+    'mission5': {
+        'stage': 'drive_to_level',
+        'x': '-1.55',
+        'y': '1.258',
+        'yaw': '0.0',
+    },
+    # On the run down to the tunnel, 0.60 m before its mouth. The road turns
+    # to run along y at this end of the course - white at x -1.873, yellow at
+    # x -1.623 - so the lane centre is x -1.748, and the way in is the 0.34 m
+    # gap in tunnel_wall's north side at y -0.12.
+    #
+    # The robot travels in -y here, which is how the level crossing leaves it,
+    # so this preset faces -90 and needs the turn that full.launch.py does
+    # after the spawn.
+    'mission6': {
+        'stage': 'drive_to_tunnel',
+        'x': '-1.748',
+        'y': '0.48',
+        'yaw': '-90.0',
+    },
 }
 
 
@@ -161,6 +196,37 @@ def block_bay(which):
         package='ros_gz_sim', executable='create', output='screen',
         arguments=['-file', model, '-name', f'parking_dummy_{which}',
                    '-x', x, '-y', y, '-z', '0.0'])
+
+
+# Where the roof over the tunnel mouth goes (ARX). The walls are already in
+# turtlebot3_autorace_2020.world - tunnel_wall, defined inline rather than
+# through an <include>, which is why a first pass here missed it and built a
+# duplicate pair straight through them. Four walls, 0.05 thick and 0.25 tall,
+# enclosing about 1.93 x 1.85 m, with the way in a 0.34 m gap in the north
+# side between Wall_4's west end at x -1.605 and Wall_1 at x -1.946.
+#
+# The plate spans that gap and rests on the walls either side of it:
+# x -1.971 to -1.605 and y -0.096 to -0.596, so its middle is here.
+TUNNEL_ROOF = ('-1.788', '-0.346', '0.0')
+
+
+def build_roof():
+    """Put a roof over the mouth of the tunnel (ARX).
+
+    The world has the walls and no roof, so the tunnel is open to the sky and
+    the camera can still read the lane lines inside it. On by default for that
+    reason; roof:=false leaves the course exactly as the example has it.
+
+    Spawned here rather than added to the example's world file, which belongs
+    to them - and which is where the walls came from.
+    """
+    x, y, z = TUNNEL_ROOF
+    model = os.path.join(get_package_share_directory('arx_mission'),
+                         'model', 'tunnel_roof.sdf')
+    return Node(
+        package='ros_gz_sim', executable='create', output='screen',
+        arguments=['-file', model, '-name', 'tunnel_roof',
+                   '-x', x, '-y', y, '-z', z])
 
 
 def turn_robot(preset):
@@ -224,6 +290,7 @@ def stack(context, *unused_args, **unused_kwargs):
             f'Known: {", ".join(sorted(PRESETS))}')
     preset = PRESETS[start]
 
+    roof = LaunchConfiguration('roof').perform(context).lower() in ('true', '1')
     blocked = LaunchConfiguration('blocked').perform(context)
     if blocked not in BAYS and blocked != 'none':
         raise RuntimeError(
@@ -261,6 +328,7 @@ def stack(context, *unused_args, **unused_kwargs):
         include('arx_mission', 'traffic_light.launch.py'),
         include('arx_mission', 'detect_sign.launch.py'),
         include('arx_mission', 'detect_obstacle.launch.py'),
+        include('arx_mission', 'detect_level.launch.py'),
     ]
 
     # The sequencer still comes up before control_lane. It no longer has to -
@@ -287,6 +355,7 @@ def stack(context, *unused_args, **unused_kwargs):
         # same world.
         *([TimerAction(period=7.0, actions=[block_bay(blocked)])]
           if blocked != 'none' else []),
+        *([TimerAction(period=7.5, actions=[build_roof()])] if roof else []),
         TimerAction(period=8.0, actions=camera),
         TimerAction(period=14.0, actions=mission),
         TimerAction(period=16.0, actions=lane),
@@ -298,6 +367,13 @@ def generate_launch_description():
         DeclareLaunchArgument('start', default_value='full',
                               description='Preset to begin from: '
                                           + ', '.join(sorted(PRESETS))),
+        DeclareLaunchArgument('roof', default_value='true',
+                              description='Roof the tunnel mouth. On by '
+                                          'default: the world has walls but '
+                                          'no roof, so without it the camera '
+                                          'can still read the lane inside. '
+                                          'roof:=false leaves the course as '
+                                          'the example has it.'),
         DeclareLaunchArgument('blocked', default_value='none',
                               description='Park a robot in one of the parking '
                                           'bays: none, '

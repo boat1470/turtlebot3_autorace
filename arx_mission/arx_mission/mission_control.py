@@ -47,7 +47,7 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, UInt8
+from std_msgs.msg import Bool, Float32, UInt8
 
 # /arx/traffic_light - must match detect_traffic_light.py
 LIGHT_UNKNOWN = 0
@@ -93,6 +93,8 @@ MISSION_TRAFFIC_LIGHT = 1
 MISSION_INTERSECTION = 2
 MISSION_CONSTRUCTION = 3
 MISSION_PARKING = 4
+MISSION_LEVEL = 5
+MISSION_TUNNEL = 6
 
 STAGE_WAIT_GREEN = 'wait_green'
 STAGE_DRIVE_TO_SIGN = 'drive_to_sign'
@@ -105,6 +107,10 @@ STAGE_DRIVE_TO_PARKING = 'drive_to_parking'
 STAGE_DRIVE_TO_LOT = 'drive_to_lot'
 STAGE_PICK_BAY = 'pick_bay'
 STAGE_PARK_IN_BAY = 'park_in_bay'
+STAGE_DRIVE_TO_LEVEL = 'drive_to_level'
+STAGE_APPROACH_BAR = 'approach_bar'
+STAGE_WAIT_BAR = 'wait_bar'
+STAGE_DRIVE_TO_TUNNEL = 'drive_to_tunnel'
 
 # /detect/lane_state, from detect_lane: which line it is steering by.
 LANE_STATE_FOR_SIDE = {FOLLOW_YELLOW: 1, FOLLOW_WHITE: 3}
@@ -127,6 +133,10 @@ STAGES = frozenset({
     STAGE_DRIVE_TO_LOT,
     STAGE_PICK_BAY,
     STAGE_PARK_IN_BAY,
+    STAGE_DRIVE_TO_LEVEL,
+    STAGE_APPROACH_BAR,
+    STAGE_WAIT_BAR,
+    STAGE_DRIVE_TO_TUNNEL,
     STAGE_STOPPED,
 })
 
@@ -139,6 +149,15 @@ STAGES = frozenset({
 # course's - a robot facing into the parking lot has the bay at the larger x
 # on its LEFT, and naming these after the course is the mistake that once put
 # the construction stage into the sign beside the track.
+# /detect/level_bar, from detect_level: the level crossing bar. NONE is not
+# the same as UP - it means the detector has nothing it is willing to call a
+# bar, which at close range it reports alternately with UP as the row
+# grouping loses a band. Only DOWN stops the robot.
+BAR_NONE = 0
+BAR_UP = 1
+BAR_DOWN = 2
+BAR_NAMES = {BAR_NONE: 'nothing', BAR_UP: 'up', BAR_DOWN: 'down'}
+
 SIDE_CLEAR = 0
 SIDE_LEFT = 1
 SIDE_RIGHT = 2
@@ -579,6 +598,108 @@ class MissionControl(Node):
         self.declare_parameter('bay.park.leave_tolerance_deg', 20.0)
         self.declare_parameter('bay.park.give_up_s', 90.0)
 
+        # The level crossing (ARX). No sign to hunt here - the bar itself is
+        # what says the mission has begun - so this is one watch, one creep
+        # and one wait.
+        #
+        # Measured walking in to the bar at (-0.85, 1.26) in 5 cm steps:
+        #
+        #   0.85 .. 0.65 m   bar up, the resting state
+        #   0.60 m           the bar comes down
+        #   0.55 .. 0.35 m   down, and it holds 13.1 s
+        #   0.30 m           up again
+        #
+        # 13.1 s is 0.91 m at the speed this drives, against 0.30 m to cover,
+        # so the robot reaches the stop with about nine seconds to spare.
+        self.declare_parameter('level.enabled', True)
+        self.declare_parameter('level.confirm_ticks', 3)
+        # Not UP, but "anything other than DOWN". detect_level alternates
+        # between up and nothing at close range - measured - and both mean the
+        # road is clear. Waiting for a run of UP alone can stall on that
+        # flicker.
+        self.declare_parameter('level.clear_ticks', 5)
+        # Where to stand. Nearer than 0.20 m the camera has nothing to look
+        # at: it sits 0.076 m ahead of the model origin, which is 0.038 m
+        # ahead of the robot's own nose, so at 0.06 m it is already past the
+        # bar. 0.30 m leaves the bar filling a good part of the frame with
+        # room to spare.
+        self.declare_parameter('level.stop_m', 0.30)
+        self.declare_parameter('level.speed', 0.04)
+        # A cap on the creep, because /detect/level_range is only trustworthy
+        # inside about 0.50 m: further out the detector often resolves three
+        # of the four bands and the span it measures is between the wrong
+        # two. The range is what aims; this is what stops a bad one running
+        # the robot into the bar.
+        self.declare_parameter('level.max_creep_m', 0.60)
+        self.declare_parameter('level.stop_at_bar', False)
+        self.declare_parameter('level.give_up_s', 90.0)
+        # Under thirty seconds, deliberately. The rules end a run when the
+        # robot has not moved for that long, so a bar that never lifts has to
+        # be given up on before then rather than after.
+        self.declare_parameter('level.wait_give_up_s', 25.0)
+
+        # The tunnel (ARX). Getting in is the whole of this stage; what to do
+        # once inside is not built yet.
+        #
+        # There is no sign hunt and no upward range finder. The walls are
+        # already in the world - tunnel_wall, four of them, 0.05 thick and
+        # 0.25 tall, enclosing about 1.93 x 1.85 m with a 0.34 m way in - and
+        # the LiDAR reads them straight off /detect/obstacle_side:
+        #
+        #   outside, y +0.60    left 1.081   right nothing
+        #   outside, y +0.20    left 0.673   right nothing
+        #   the mouth, y -0.10  left 0.169   right 0.120
+        #   inside,  y -0.35    left 0.355   right 0.120
+        #
+        # Both sides at once is the signature worth waiting for. One side
+        # alone is any prop standing near the road; both, at these distances,
+        # is a corridor. It holds for about 0.5 m from the mouth, which at 10
+        # Hz is a long time to confirm in.
+        #
+        # An upward range finder would say it more directly, and was asked
+        # for. It would also mean forking the example's robot model, its
+        # spawn launch and the simulator launch that includes it, because a
+        # sensor has to live in the model and gz's DetachableJoint has to be
+        # declared in the parent model as well. The LiDAR answers the same
+        # question with nothing forked, and without depending on the light.
+        self.declare_parameter('tunnel.enabled', True)
+        # Stop steering by the lane when something comes inside this, in the
+        # wide wedge ahead. The lane ends at the mouth - under the roof there
+        # is no paint at all - so the last thing to do while there is still a
+        # line is to take the heading it was holding and carry it in.
+        # Which way the robot has to be pointing for any of this to count.
+        #
+        # Without it the test is "something inside 0.20 m ahead, then
+        # something on the right", and that is true in a great many places. A
+        # run came through mission 5 and called the tunnel while facing +0.7
+        # degrees - travelling +x, on the level crossing road, ninety degrees
+        # off the only heading the mouth can be entered from. The stop board
+        # at (-1.35, 1.04) sits about 0.21 m off that line on the right, which
+        # fits what the scan reported.
+        #
+        # It is the same mistake the construction stage made once, and every
+        # sign hunt in this file has carried a heading gate since.
+        #
+        # The lane runs along y at this end of the course and the robot
+        # arrives travelling -y, so -90.
+        self.declare_parameter('tunnel.heading.enabled', True)
+        self.declare_parameter('tunnel.heading.center_deg', -90.0)
+        self.declare_parameter('tunnel.heading.tolerance_deg', 45.0)
+        self.declare_parameter('tunnel.enter_m', 0.20)
+        self.declare_parameter('tunnel.enter_ticks', 3)
+        self.declare_parameter('tunnel.speed', 0.04)
+        # Both walls at once, not the right one alone. The right is the
+        # steadier of the two - a flat 0.120 m over sixty beams from the mouth
+        # to the far end, while the left falls away to 1.106 m within half a
+        # metre - but steadier is not the same as particular, and on its own
+        # it accepted a sign by the road. Measured at the mouth: left 0.176,
+        # right 0.140, together.
+        self.declare_parameter('tunnel.need_both', True)
+        self.declare_parameter('tunnel.confirm_ticks', 5)
+        # Stop on getting in. The debug step, like every mission before it.
+        self.declare_parameter('tunnel.stop_after_entry', True)
+        self.declare_parameter('tunnel.give_up_s', 120.0)
+
         self.declare_parameter('rate_hz', 10.0)
 
         # The world heading the robot is standing at before it moves (ARX).
@@ -710,7 +831,7 @@ class MissionControl(Node):
         self.lot_mark = None
         # The heading the corridor is being run on, once the robot has
         # settled onto one, and the window it is judged from.
-        self.lot_heading = None
+        self.hold_heading_deg = None
         self.lot_recent = deque(maxlen=60)
         self.lot_turn = 0.0
         self.lot_last_yaw = None
@@ -718,6 +839,17 @@ class MissionControl(Node):
         # chosen from it.
         self.side = None
         self.bay = None
+        # Latest report from detect_level, and how many ticks in a row it has
+        # said the same thing.
+        self.bar = None
+        self.bar_range = None
+        self.bar_ticks = 0
+        # Ticks in a row the tunnel test has held, and whether the robot has
+        # stopped steering by the lane and is driving itself in.
+        self.tunnel_ticks = 0
+        self.tunnel_going_in = False
+        self.tunnel_rejected = 0
+        self.front_range = None
         # Backing into the bay: which phase, which way round, and the marks
         # each phase measures from.
         self.park_phase = 0
@@ -747,6 +879,9 @@ class MissionControl(Node):
         self.create_subscription(Odometry, '/odom', self.on_odom, 1)
         self.create_subscription(UInt8, '/detect/obstacle', self.on_obstacle, 1)
         self.create_subscription(UInt8, '/detect/obstacle_side', self.on_side, 1)
+        self.create_subscription(Float32, '/detect/front_range', self.on_front, 1)
+        self.create_subscription(UInt8, '/detect/level_bar', self.on_bar, 1)
+        self.create_subscription(Float32, '/detect/level_range', self.on_bar_range, 1)
         # How much of the frame each line fills, as detect_lane sees it.
         # Both are computed every frame whatever follow_side says, so they
         # stay live while the robot is hugging one of them - which
@@ -817,6 +952,18 @@ class MissionControl(Node):
     def on_side(self, msg):
         """Which side of the robot detect_obstacle says is taken (ARX)."""
         self.side = msg.data
+
+    def on_front(self, msg):
+        """Nearest thing in the wide wedge ahead, in metres (ARX)."""
+        self.front_range = msg.data
+
+    def on_bar(self, msg):
+        """Whether detect_level can see the crossing bar, and how (ARX)."""
+        self.bar = msg.data
+
+    def on_bar_range(self, msg):
+        """How far detect_level says the bar is, in metres (ARX)."""
+        self.bar_range = msg.data
 
     def heading_ok(self, prefix=None):
         """Whether the robot is pointing a way this mission's board can be seen from."""
@@ -996,6 +1143,14 @@ class MissionControl(Node):
             self.tick_pick_bay(now)
         elif self.stage == STAGE_PARK_IN_BAY:
             self.tick_park_in_bay(now)
+        elif self.stage == STAGE_DRIVE_TO_LEVEL:
+            self.tick_drive_to_level(now)
+        elif self.stage == STAGE_APPROACH_BAR:
+            self.tick_approach_bar(now)
+        elif self.stage == STAGE_WAIT_BAR:
+            self.tick_wait_bar(now)
+        elif self.stage == STAGE_DRIVE_TO_TUNNEL:
+            self.tick_drive_to_tunnel(now)
         else:
             self.tick_stopped()
 
@@ -1590,14 +1745,14 @@ class MissionControl(Node):
         window = list(self.lot_recent)[-need:]
         if max(window) - min(window) > self.get_parameter('lot.steady_band_deg').value:
             return False
-        self.lot_heading = sum(window) / len(window)
+        self.hold_heading_deg = sum(window) / len(window)
         return True
 
-    def lot_correction(self):
+    def hold_correction(self):
         """How hard to steer back onto the corridor heading (ARX)."""
-        if self.lot_heading is None or self.yaw is None:
+        if self.hold_heading_deg is None or self.yaw is None:
             return 0.0
-        err = (self.lot_heading - self.yaw + 180.0) % 360.0 - 180.0
+        err = (self.hold_heading_deg - self.yaw + 180.0) % 360.0 - 180.0
         cap = self.get_parameter('lot.max_angular').value
         return max(-cap, min(cap, self.get_parameter('lot.kp').value * err))
 
@@ -1631,19 +1786,19 @@ class MissionControl(Node):
         self.set_driving(True)
         self.set_armed(MISSION_NONE)
 
-        if self.lot_heading is None:
+        if self.hold_heading_deg is None:
             # Lane following, steering by the yellow line, all the way round
             # the turn and into the corridor.
             self.set_avoid(False)
             self.set_follow_side(FOLLOW_YELLOW)
             if self.lot_watch_heading():
                 self.get_logger().info(
-                    f'straight down the corridor on {self.lot_heading:+.1f} deg '
+                    f'straight down the corridor on {self.hold_heading_deg:+.1f} deg '
                     f'after turning {self.lot_turn:+.0f} - holding it from here')
         else:
             # Holding it. The corridor is straight and the yellow line is
             # about to end, so there is nothing lane following can add.
-            self.set_avoid(True, angular=self.lot_correction(),
+            self.set_avoid(True, angular=self.hold_correction(),
                            linear=self.get_parameter('lot.speed').value)
 
         # Watched the whole time, whoever is steering: detect_lane keeps
@@ -1677,7 +1832,7 @@ class MissionControl(Node):
             # never settled into the corridor, one that did and never reached
             # the end of the yellow line, and one that did and never covered
             # the lead.
-            state = ('never settled into the corridor' if self.lot_heading is None
+            state = ('never settled into the corridor' if self.hold_heading_deg is None
                      else 'yellow line never ran out' if self.lot_mark is None
                      else f'{self.lot_gone():.2f} m of the lead done')
             self.get_logger().warn(
@@ -1852,7 +2007,7 @@ class MissionControl(Node):
             self.set_avoid(True, angular=way * speed / radius, linear=speed)
             if self.park_swept() >= self.get_parameter('bay.park.turn_deg').value:
                 if self.get_parameter('bay.park.rejoin').value:
-                    self.lot_heading = self.yaw
+                    self.hold_heading_deg = self.yaw
                     self.park_next('holding the way out until a line appears', now)
                 else:
                     self.finish_park('out of the bay')
@@ -1861,7 +2016,7 @@ class MissionControl(Node):
         elif self.park_phase == 4:
             # Same P term the approach used, on the heading the arc finished
             # on. There is no line here for another 50 mm or so.
-            self.set_avoid(True, angular=self.lot_correction(), linear=speed)
+            self.set_avoid(True, angular=self.hold_correction(), linear=speed)
             if self.lane_state not in (None, 0):
                 self.park_ticks += 1
                 if self.park_ticks >= self.get_parameter('bay.park.rejoin_ticks').value:
@@ -1903,7 +2058,236 @@ class MissionControl(Node):
         # returns it whenever the junction never picked a line, which is the
         # case on any run that reaches the parking lot - so there is nothing
         # to set.
-        self.go(STAGE_FOLLOW_SIDE, why)
+        if self.get_parameter('level.enabled').value:
+            self.go(STAGE_DRIVE_TO_LEVEL, f'{why} - on to the level crossing')
+        else:
+            self.go(STAGE_FOLLOW_SIDE, why)
+
+    def bar_run(self, wanted):
+        """How many ticks in a row the bar report has matched (ARX).
+
+        `wanted` is a set, because the useful question at the crossing is not
+        always one value: leaving is decided on "anything but down", since the
+        detector alternates between up and nothing at close range and both of
+        those mean the road is clear.
+        """
+        if self.bar in wanted:
+            self.bar_ticks += 1
+        else:
+            self.bar_ticks = 0
+        return self.bar_ticks
+
+    def tick_drive_to_level(self, now):
+        """Carry on down the road until the crossing bar comes down (ARX).
+
+        Nothing is hunted on the way. There is no sign for this mission - the
+        example has a stop board at (-1.35, 1.04) and a detector for it, but
+        the bar itself is the thing that has to be obeyed, and it is visible
+        from 0.60 m which is further than the board is useful from.
+        """
+        self.set_driving(True)
+        self.set_avoid(False)
+        self.set_follow_side(self.chosen_side())
+        self.set_armed(MISSION_LEVEL)
+
+        need = self.get_parameter('level.confirm_ticks').value
+        if self.bar_run({BAR_DOWN}) >= need:
+            self.hold_heading_deg = self.yaw
+            self.bar_ticks = 0
+            rng = 'unknown' if self.bar_range is None else f'{self.bar_range:.2f} m'
+            self.get_logger().info(
+                f'crossing bar is down, {rng} away - creeping up to '
+                f'{self.get_parameter("level.stop_m").value:.2f} m')
+            self.lot_mark = self.pos
+            self.go(STAGE_APPROACH_BAR, 'bar down')
+            return
+
+        waited = now - self.stage_since
+        if waited > self.get_parameter('level.give_up_s').value:
+            self.get_logger().warn(
+                f'no crossing bar after {waited:.0f} s '
+                f'(last report {BAR_NAMES.get(self.bar, self.bar)}) - carrying on')
+            self.go(STAGE_FOLLOW_SIDE, 'gave up on the crossing')
+
+    def tick_approach_bar(self, now):
+        """Creep up to the bar and stop short of it (ARX).
+
+        Driven from here rather than by lane following, so that the distance
+        is the only thing deciding when to stop. The heading is the one the
+        robot was holding when the bar was confirmed - the road is straight
+        here, and there is no reason to let the lane follower steer while the
+        robot is watching something else.
+        """
+        self.set_driving(True)
+        self.set_armed(MISSION_LEVEL)
+        self.set_avoid(True, angular=self.hold_correction(),
+                       linear=self.get_parameter('level.speed').value)
+
+        gone = self.dist_from(self.lot_mark)
+        rng = self.bar_range
+
+        # The bar lifting while the robot is still creeping is the ordinary
+        # case in the simulator, where the plugin opens it at 0.30 m. It is
+        # not a fault, it is the crossing letting the robot through.
+        if self.bar_run({BAR_UP, BAR_NONE}) >= self.get_parameter(
+                'level.clear_ticks').value:
+            self.finish_level(f'bar lifted while creeping, {gone:.2f} m in')
+            return
+
+        if rng is not None and rng <= self.get_parameter('level.stop_m').value:
+            self.get_logger().info(
+                f'stopping {rng:.2f} m short of the bar, after {gone:.2f} m')
+            self.set_avoid(True, angular=0.0, linear=0.0)
+            self.bar_ticks = 0
+            if self.get_parameter('level.stop_at_bar').value:
+                self.stop('at the crossing bar - stopping here, as asked')
+            else:
+                self.go(STAGE_WAIT_BAR, 'at the bar')
+            return
+
+        if gone is not None and gone >= self.get_parameter('level.max_creep_m').value:
+            # The range said to keep going for longer than the road has. Out
+            # past about 0.50 m detect_level often resolves three of the four
+            # bands and measures the span between the wrong two, so a reading
+            # that never comes down is expected rather than surprising.
+            self.get_logger().warn(
+                f'crept {gone:.2f} m without the range reaching '
+                f'{self.get_parameter("level.stop_m").value:.2f} m '
+                f'(last {rng}) - standing here anyway')
+            self.set_avoid(True, angular=0.0, linear=0.0)
+            self.bar_ticks = 0
+            self.go(STAGE_WAIT_BAR, 'ran out of creep')
+
+    def tick_wait_bar(self, now):
+        """Stand at the bar until it lifts (ARX)."""
+        self.set_driving(True)
+        self.set_armed(MISSION_LEVEL)
+        self.set_avoid(True, angular=0.0, linear=0.0)
+
+        need = self.get_parameter('level.clear_ticks').value
+        if self.bar_run({BAR_UP, BAR_NONE}) >= need:
+            self.finish_level(f'bar lifted after {now - self.stage_since:.0f} s')
+            return
+
+        waited = now - self.stage_since
+        if waited > self.get_parameter('level.wait_give_up_s').value:
+            # Before thirty seconds, which is where the rules end a run for
+            # standing still. A bar that will not lift is worth driving into
+            # the mission after it rather than losing the whole run to.
+            self.get_logger().warn(
+                f'the bar has not lifted after {waited:.0f} s - going anyway, '
+                f'before the thirty seconds that end a run')
+            self.finish_level('gave up waiting for the bar')
+
+    def finish_level(self, why):
+        """Let go of the wheel and carry on down the course (ARX)."""
+        self.set_avoid(True, angular=0.0, linear=0.0)
+        self.set_avoid(False)
+        self.set_armed(MISSION_NONE)
+        self.get_logger().info(f'level crossing done: {why}')
+        if self.get_parameter('tunnel.enabled').value:
+            self.go(STAGE_DRIVE_TO_TUNNEL, f'{why} - on to the tunnel')
+        else:
+            self.go(STAGE_FOLLOW_SIDE, why)
+
+    def tick_drive_to_tunnel(self, now):
+        """Drive into the tunnel and stop once the wall is alongside (ARX).
+
+        Two parts, because the lane runs out before the tunnel does.
+
+            follow the lane, watching the wide wedge ahead
+            something inside 0.20 m -> hold that heading and go straight in
+            the right-hand wall alongside -> stop
+
+        The walls come with the course. tunnel_wall is defined inline in
+        turtlebot3_autorace_2020.world rather than through an include, which
+        is why a search for a model of that name turns up nothing. What the
+        course does not come with is a roof; full.launch.py builds one over
+        the mouth so that the camera loses the lane inside, which is the
+        condition this mission is about - and the reason the heading has to be
+        taken while there is still a line to take it from.
+
+        Entry is read off the LiDAR rather than an upward range finder. A
+        sensor has to live inside the robot's model, that model belongs to the
+        example, and gz's DetachableJoint has to be declared in the parent
+        model as well, so adding one would mean forking the robot and both of
+        its launch files. The LiDAR answers the same question with nothing
+        forked, and without depending on the light.
+        """
+        self.set_driving(True)
+        self.set_armed(MISSION_TUNNEL)
+
+        # Nothing here counts unless the robot is pointing the way the mouth
+        # can be entered from. Checked in both parts, not just the first: the
+        # heading is held through the second, so if it was wrong going in it
+        # is wrong coming to the wall as well.
+        facing = self.heading_ok('tunnel')
+
+        if not self.tunnel_going_in:
+            self.set_avoid(False)
+            self.set_follow_side(self.chosen_side())
+            near = self.get_parameter('tunnel.enter_m').value
+            close = self.front_range is not None and self.front_range <= near
+            if close and not facing:
+                self.tunnel_rejected += 1
+                if self.tunnel_rejected == 1:
+                    where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+                    want = self.get_parameter('tunnel.heading.center_deg').value
+                    tol = self.get_parameter('tunnel.heading.tolerance_deg').value
+                    self.get_logger().info(
+                        f'something {self.front_range:.2f} m ahead but facing '
+                        f'{where}, want {want:+.0f}+/-{tol:.0f} - not the tunnel')
+            if close and facing:
+                self.tunnel_ticks += 1
+                if self.tunnel_ticks >= self.get_parameter('tunnel.enter_ticks').value:
+                    self.tunnel_going_in = True
+                    self.tunnel_ticks = 0
+                    self.hold_heading_deg = self.yaw
+                    where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+                    self.get_logger().info(
+                        f'the tunnel mouth is {self.front_range:.2f} m ahead - '
+                        f'holding {where} and going straight in')
+            else:
+                self.tunnel_ticks = 0
+        else:
+            # No line left to steer by under the roof, so hold the heading the
+            # lane gave and creep.
+            self.set_avoid(True, angular=self.hold_correction(),
+                           linear=self.get_parameter('tunnel.speed').value)
+            if self.get_parameter('tunnel.need_both').value:
+                walls = self.side == (SIDE_LEFT | SIDE_RIGHT)
+                what = 'walls either side'
+            else:
+                walls = self.side is not None and bool(self.side & SIDE_RIGHT)
+                what = 'wall alongside on the right'
+            if walls and facing:
+                self.tunnel_ticks += 1
+                if self.tunnel_ticks >= self.get_parameter('tunnel.confirm_ticks').value:
+                    where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+                    self.get_logger().info(
+                        f'{what} - in the tunnel, facing {where}')
+                    self.set_avoid(True, angular=0.0, linear=0.0)
+                    self.set_avoid(False)
+                    if self.get_parameter('tunnel.stop_after_entry').value:
+                        self.stop('in the tunnel - stopping here, as asked')
+                    else:
+                        self.go(STAGE_FOLLOW_SIDE, 'in the tunnel')
+                    return
+            else:
+                self.tunnel_ticks = 0
+
+        waited = now - self.stage_since
+        if waited > self.get_parameter('tunnel.give_up_s').value:
+            state = ('never found the mouth' if not self.tunnel_going_in
+                     else 'went in and never found the walls')
+            yaw = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+            self.get_logger().warn(
+                f'not in the tunnel after {waited:.0f} s ({state}, '
+                f'ahead {self.front_range}, side {self.side}, facing {yaw}, '
+                f'{self.tunnel_rejected} ignored on heading) - carrying on')
+            self.set_avoid(True, angular=0.0, linear=0.0)
+            self.set_avoid(False)
+            self.go(STAGE_FOLLOW_SIDE, 'gave up on the tunnel')
 
     def tick_stopped(self):
         self.set_armed(MISSION_NONE)

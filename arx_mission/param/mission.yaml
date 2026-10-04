@@ -649,6 +649,168 @@
 
         give_up_s: 90.0
 
+    # --- the level crossing -----------------------------------------------
+    #
+    # No sign to hunt. The example has a stop board at (-1.35, 1.04) and a
+    # detector for it, but the bar itself is the thing that has to be obeyed
+    # and it is visible from 0.60 m, which is further out than the board is
+    # useful from. So: watch, creep, wait.
+    #
+    # Measured walking in to the bar at (-0.85, 1.26) in 5 cm steps:
+    #
+    #   0.85 .. 0.65 m   bar up, the resting state
+    #   0.60 m           the bar comes down
+    #   0.55 .. 0.35 m   down, and it holds 13.1 s
+    #   0.30 m           up again
+    #
+    # 13.1 s is 0.91 m at this speed against 0.30 m to cover, so the robot
+    # reaches the stop with about nine seconds in hand.
+    level:
+      enabled: true
+
+      # Ticks in a row before acting. Down is confirmed quickly because a
+      # false stop costs a few seconds; clear is confirmed more slowly
+      # because a false start drives into the bar.
+      confirm_ticks: 3
+
+      # Leaving is decided on "anything other than down", not on "up".
+      # detect_level alternates between up and nothing at close range -
+      # measured, the row grouping loses a band on some frames - and both
+      # mean the road is clear. Waiting for a run of UP alone stalls on that
+      # flicker.
+      clear_ticks: 5
+
+      # Where to stand. Nearer than 0.20 m the camera has nothing to look at:
+      # it sits 0.076 m ahead of the model origin, which is itself 0.038 m
+      # ahead of the robot's own nose, so at 0.06 m the camera is already past
+      # the bar. Checked - at 0.12 m and 0.06 m the frame has no red in it at
+      # all.
+      stop_m: 0.30
+
+      speed: 0.04
+
+      # A cap on the creep. /detect/level_range is only trustworthy inside
+      # about 0.50 m: further out detect_level often resolves three of the
+      # four bands and measures the span between the wrong two, which reads
+      # as further away than it is. Two runs at the same distance gave 0.51
+      # and 0.81 m for that reason. The range is what aims; this is what
+      # stops a bad one running the robot into the bar.
+      max_creep_m: 0.60
+
+      # Stop on arriving at the bar instead of waiting for it. For checking
+      # the approach on its own.
+      stop_at_bar: false
+
+      give_up_s: 90.0
+
+      # Under thirty seconds, deliberately: the rules end a run when the robot
+      # has not moved for that long, so a bar that never lifts has to be given
+      # up on before then rather than after.
+      wait_give_up_s: 25.0
+
+    # --- the tunnel --------------------------------------------------------
+    #
+    # Getting in is the whole of this stage; what to do once inside is not
+    # built yet.
+    #
+    # The walls come with the course. tunnel_wall is defined inline in
+    # turtlebot3_autorace_2020.world rather than through an <include>, which
+    # is why searching for a model directory or for `model://` finds nothing
+    # and a first pass here concluded there was no tunnel at all. Four walls,
+    # 0.05 m thick and 0.25 m tall:
+    #
+    #   Wall_1   x -1.946   y -1.886 .. -0.086     west
+    #   Wall_2   y -1.971   x -1.865 .. -0.065     south
+    #   Wall_3   x -0.021   y -1.621 .. -0.084     east
+    #   Wall_4   y -0.121   x -1.605 .. -0.025     north
+    #
+    # About 1.93 x 1.85 m enclosed, with the way in a 0.34 m gap in the north
+    # side that the lane runs straight into. What the course does NOT come
+    # with is a roof - full.launch.py builds one over the mouth, on by
+    # default, so that the camera loses the lane inside.
+    #
+    # Entry is read off the LiDAR. Measured, driving in:
+    #
+    #   outside, y +0.60    left 1.081   right nothing
+    #   outside, y +0.20    left 0.673   right nothing
+    #   the mouth, y -0.10  left 0.169   right 0.120
+    #   inside,  y -0.35    left 0.355   right 0.120
+    #   inside,  y -0.70    left 1.106   right 0.120
+    #
+    # An upward range finder was asked for and would say it more directly. It
+    # would also mean forking the example's robot model, its spawn launch and
+    # the simulator launch that includes it, because a sensor has to live in
+    # the model and gz's DetachableJoint has to be declared in the parent
+    # model too. The LiDAR answers the same question with nothing forked, and
+    # without depending on the light - the camera's own signal is 190 outside
+    # against 90 under the roof, which works but is a brightness threshold.
+    tunnel:
+      enabled: true
+
+      # Which way the robot has to be pointing for any of this to count.
+      #
+      # Without it the test is "something inside 0.20 m ahead, then something
+      # on the right", and that is true in a great many places. A run came
+      # through mission 5 and called the tunnel while facing +0.7 degrees -
+      # travelling +x, on the level crossing road, ninety degrees off the only
+      # heading the mouth can be entered from. Two other things in that log
+      # said the same: the range ahead jumped from 0.175 m to 1.448 m, which
+      # is passing something rather than entering anything, and the left side
+      # reported nothing at all where the mouth gives 0.176 m.
+      #
+      # The stop board at (-1.35, 1.04) sits about 0.21 m off that line on the
+      # right, which fits what the scan reported.
+      #
+      # It is the same mistake the construction stage made once, and every
+      # sign hunt in this file has carried a heading gate since. The lane runs
+      # along y at this end of the course and the robot arrives travelling -y,
+      # so -90.
+      heading:
+        enabled: true
+        center_deg: -90.0
+        tolerance_deg: 45.0
+
+      # Stop steering by the lane when something comes inside this, in the
+      # wide wedge ahead on /detect/front_range.
+      #
+      # The lane runs out before the tunnel does: under the roof there is no
+      # paint at all. So the last useful thing to do while there is still a
+      # line is to take the heading it was holding and carry that in, which is
+      # the same move the parking lot and the level crossing both make.
+      #
+      # The wedge is 45 degrees either side, set in obstacle.yaml. It has to
+      # be wide because the walls that mark the mouth stand off to both sides
+      # of the gap the robot is aiming at, not square in front of it.
+      enter_m: 0.20
+      enter_ticks: 3
+
+      speed: 0.04
+
+      # Both walls at once, not the right one alone.
+      #
+      # The right is the steadier of the two - a flat 0.120 m over sixty beams
+      # from the mouth all the way to the far end, while the left falls away
+      # to 1.106 m within half a metre of the entrance - but steadier is not
+      # the same as particular, and on its own it accepted a sign by the road.
+      # At the mouth both are there together: left 0.176, right 0.140.
+      need_both: true
+      #
+      #   outside, y +0.60    left 1.081   right nothing
+      #   outside, y +0.20    left 0.673   right nothing
+      #   the mouth, y -0.10  left 0.169   right 0.120
+      #   inside,  y -0.35    left 0.355   right 0.120
+      #   inside,  y -0.70    left 1.106   right 0.120
+      #
+      # Which also says how long both-at-once lasts: about half a metre from
+      # the mouth, which at 10 Hz and 0.04 m/s is a hundred ticks to confirm
+      # in.
+      confirm_ticks: 5
+
+      # Stop on getting in. The debug step, like every mission before it.
+      stop_after_entry: true
+
+      give_up_s: 120.0
+
     # --- lane following (arx_control_lane) ------------------------------
     control:
       # Raised from the example's 0.0025. At that gain the robot had to be

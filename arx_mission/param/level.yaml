@@ -1,0 +1,102 @@
+---
+# The level crossing bar, for arx_mission/detect_level.py.
+#
+# Every number here was measured on this course with this camera, at y 1.25
+# facing +x, against the bar at (-0.85, 1.26). The bar is 0.30 x 0.02 x 0.05 m
+# and its texture carries FOUR red bands, not three.
+#
+# What the approach looks like, walked in 5 cm steps:
+#
+#   0.85 .. 0.65 m   bar up      the resting state
+#   0.60 m           bar comes down
+#   0.55 .. 0.35 m   bar down    holds 13.1 s, long enough to cover 0.91 m
+#   0.30 m           bar goes up again
+#
+# LiDAR is no help: the bar spans z 0.100 to 0.150 and the LDS is at z 0.171,
+# so the beam passes 21 mm over the top of it.
+/**:
+  ros__parameters:
+    level:
+      # Both halves of red. OpenCV puts hue on 0-179 and red straddles the
+      # wrap, so one range catches half of it - a band rendering at hue 167 is
+      # dropped while orange at 15 is let in. The example used 0-22 alone.
+      #
+      # Saturation is what actually does the work. 0-10 plus 160-179 is a
+      # narrow hue window, but white, grey and black are rejected by S >= 173,
+      # not by hue.
+      red:
+        hue_lo_l: 0
+        hue_lo_h: 10
+        hue_hi_l: 160
+        hue_hi_h: 179
+        saturation_l: 173
+        saturation_h: 255
+        lightness_l: 106
+        lightness_h: 255
+
+      # How far away the bar can still be seen. The example's 150 gives a
+      # window 4 cm wide - measured over six distances with the bar down:
+      #
+      #   distance   0.51  0.55  0.60  0.65  0.70  0.75 m
+      #   minArea 150   3     3     2     0     0     0
+      #   minArea  80   4     4     4     4     3     3
+      #   minArea  20   4     4     4     4     4     4
+      #
+      # 80 rather than 20, because a low threshold also brings in red that is
+      # not the bar: at 0.35 m it found 7 blobs where the bar has 4, and their
+      # spacing had a standard deviation of 17.6 px. row_band_px below is what
+      # makes a low threshold survivable; this is what keeps it from being
+      # needed often.
+      min_area: 80.0
+      max_area: 5000.0
+      min_convexity: 0.7
+
+      # Which blobs belong to the bar. Its bands lie on one line, so they land
+      # within a few pixels of each other in y however far away it is, while a
+      # red thing elsewhere in the frame does not. The largest group sharing a
+      # row is the bar; the rest are dropped before any geometry runs.
+      row_band_px: 25.0
+      min_blobs: 3
+
+      # The example's two checks, brought onto the same scale and joined by
+      # `and` instead of `or`. Its own thresholds were 50 px for straightness
+      # and 6 px for even spacing - a factor of eight apart, so with `or` the
+      # loose one passed first and the tight one was never asked.
+      #
+      # Measured with the bar down at 0.35 m: worst distance from the fitted
+      # line 7.7 px and gap spread 17.6 px, but that was over 7 blobs
+      # including strays. With the row grouping in front of it both should sit
+      # well under these; if they do not, the grouping is not working.
+      max_line_error_px: 6.0
+      max_gap_spread_px: 6.0
+
+      # |slope| of the fitted line in image coordinates. Flat means the bar
+      # lies across the road, steep means it stands out of the way. 2.0 is
+      # 63.4 degrees from horizontal, which splits the two unevenly on
+      # purpose - 63 degrees of tolerance for "still down" against 27 for
+      # "up", because calling a lowered bar raised is the expensive mistake.
+      #
+      # Measured: 0.03 with the bar down, 15.72 with it up. A factor of 500
+      # between the two answers, so the threshold has room either side.
+      up_slope: 2.0
+
+      # Pixels times metres. Apparent width is inversely proportional to
+      # distance, so span_px * distance is a constant of this camera and this
+      # bar. Measured from a run, against the simulator's own pose:
+      #
+      #   true 0.55 m   span 51.0 px   k 28.04
+      #   true 0.50 m   span 57.8 px   k 28.89
+      #   true 0.45 m   span 66.7 px   k 30.00
+      #
+      # 29.0, and the 1.96 spread is +/- 3.4% - about 10 mm at the 0.30 m the
+      # mission stops at. A first pass guessed 26 from half-bar measurements
+      # and read every distance 50 mm short.
+      #
+      # It depends on the camera, the projection and the bar's real width, so
+      # it wants re-measuring on the real course. /detect/level_bar does not
+      # depend on it at all.
+      k_px_m: 29.0
+
+      frame_skip: 1
+      publish_debug_image: true
+      always_on: false

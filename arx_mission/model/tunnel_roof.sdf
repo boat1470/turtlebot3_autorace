@@ -1,0 +1,91 @@
+<?xml version="1.0" ?>
+<!--
+  Copyright 2026 boat1470
+  Licensed under the Apache License, Version 2.0
+
+  A roof over the mouth of the tunnel, flush with the walls that are already
+  there.
+
+  The walls exist. turtlebot3_autorace_2020.world defines tunnel_wall inline
+  rather than through an <include>, which is why a search for a model
+  directory or for `model://` found nothing and a first pass here concluded -
+  wrongly, and said so in a comment - that there was no tunnel at all. It is
+  four walls, each 0.05 m thick and 0.25 m tall, and its own pose offsets
+  every link:
+
+    model pose  (-0.964699, -1.03574)
+
+    Wall_1   x -1.946   y -1.886 .. -0.086     west
+    Wall_2   y -1.971   x -1.865 .. -0.065     south
+    Wall_3   x -0.021   y -1.621 .. -0.084     east
+    Wall_4   y -0.121   x -1.605 .. -0.025     north
+
+  So it encloses roughly 1.93 x 1.85 m, and the way in is the gap in the north
+  side between Wall_4's west end at x -1.605 and Wall_1 at x -1.946: 0.34 m
+  across. The lane runs straight into it - measured off the course texture,
+  white at x -1.873 and yellow at x -1.623, so the centre is x -1.748 - and
+  the sign that announces it stands at (-1.544, 0.00) facing +/-y. Past that
+  line the texture carries no paint at all, which is what a tunnel looks like
+  from above.
+
+  What is missing is the roof, and that is all this is. An earlier attempt
+  here built its own pair of side walls as well; they ran straight through
+  Wall_1 and Wall_4.
+
+    x -1.971 .. -1.605   from Wall_1's outer face to Wall_4's west end
+    y -0.096 .. -0.596   from Wall_4's inner face, 0.50 m in
+    z  0.250 .. 0.260    resting on top of walls that are 0.25 m tall
+
+  Nothing overhangs: both sides sit on wall, and the near edge is the wall
+  it butts against.
+
+  Height. The Burger is 0.192 m tall and its LDS sits at z 0.171, so the roof
+  clears it by 58 mm and the beam passes under the plate and into the walls,
+  which is where it is wanted - the camera loses the lane lines in here and
+  the LiDAR gains something to measure against.
+
+  On the light: a roof does not make it dark by itself. Measured with a plate
+  and no walls, the frame under it was BRIGHTER than at the mouth - 115.7,
+  99.8, 86.2, 96.2 going in - because light came in from every side and the
+  camera, at z 0.10, was looking out sideways at open sky. Here the walls are
+  what close it in; the plate only stops the sky.
+
+  Spawned from full.launch.py rather than added to the world file, which
+  belongs to the example. On by default, because the tunnel is open to the sky
+  without it:
+
+      ros2 launch arx_mission full.launch.py                # roof is built
+      ros2 launch arx_mission full.launch.py roof:=false    # course as shipped
+
+  Static, because nothing should be able to push it, and because a static
+  model needs no inertia and no joints.
+-->
+<sdf version="1.6">
+  <model name="tunnel_roof">
+    <static>true</static>
+    <!-- Spawned on (-1.788, -0.346), the middle of the plate, so the numbers
+         in full.launch.py are a position and not an offset to work out. -->
+    <link name="plate">
+      <pose>0 0 0.255 0 0 0</pose>
+      <collision name="collision">
+        <geometry>
+          <box>
+            <size>0.366 0.500 0.010</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="visual">
+        <geometry>
+          <box>
+            <size>0.366 0.500 0.010</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.05 0.05 0.06 1</ambient>
+          <diffuse>0.12 0.12 0.14 1</diffuse>
+          <specular>0.01 0.01 0.01 1</specular>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>
