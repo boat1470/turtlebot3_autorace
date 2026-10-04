@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>arx_camera_bringup</name>
+  <version>0.1.0</version>
+  <description>
+    Bringing the real camera up on the robot. A replacement for
+    turtlebot3_bringup's camera launch, which hardcodes a sensor mode
+    belonging to a different camera module.
+
+    Nothing in here runs in simulation and nothing in arx_mission needs it,
+    which is why it is a package of its own: it is copied to the Pi and built
+    there, and the development machine never builds it at all.
+  </description>
+  <maintainer email="claudeseat1@intronics.co.th">boat1470</maintainer>
+  <license>Apache 2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <!-- camera_ros is the libcamera bridge. It publishes /camera/image_raw on
+       the real robot, in place of the gz image bridge that does it in
+       simulation. -->
+  <exec_depend>camera_ros</exec_depend>
+  <exec_depend>rclcpp_components</exec_depend>
+  <exec_depend>ros2launch</exec_depend>
+  <!-- Optional: the launch file opens it only if it is installed. -->
+  <exec_depend>image_view</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

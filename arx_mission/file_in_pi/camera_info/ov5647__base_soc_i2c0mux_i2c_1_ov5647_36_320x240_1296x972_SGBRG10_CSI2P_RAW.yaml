@@ -1,0 +1,28 @@
+image_width: 320
+image_height: 240
+camera_name: ov5647__base_soc_i2c0mux_i2c_1_ov5647_36_320x240_1296x972_SGBRG10_CSI2P_RAW
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [155.25891014298571, 0, 154.98309198198262, 0, 155.34845777620572, 123.72157903195281, 0, 0, 1]
+distortion_model: plumb_bob
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [-0.27300784192850541, 0.052475605066692299, -0.0025774879795105736, -0.00025659530585344942, 0]
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [107.27882246224274, 0, 154.50700931232058, 0, 0, 122.52083373987789, 124.75739847904502, 0, 0, 0, 1, 0]
+binning_x: 0
+binning_y: 0
+roi:
+  x_offset: 0
+  y_offset: 0
+  height: 0
+  width: 0
+  do_rectify: false
