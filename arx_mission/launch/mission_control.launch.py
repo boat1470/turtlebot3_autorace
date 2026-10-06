@@ -49,8 +49,13 @@ def generate_launch_description():
 
     args = [
         DeclareLaunchArgument(
-            'use_sim_time', default_value='true',
-            description='Follow /clock. Both give-up timers are measured on this.'),
+            'use_sim_time', default_value='false',
+            description='Follow /clock. Both give-up timers are measured on this. '
+                        'Defaults false: the only publisher of /clock in this '
+                        'stack is the simulator, and a node told to follow a '
+                        'clock that never ticks has timers that never fire - '
+                        'it sits there, with nothing in any log to say why. '
+                        'full.launch.py passes true whenever it starts Gazebo.'),
         DeclareLaunchArgument(
             'start_stage', default_value='wait_green',
             description='Stage to begin in. Anything but wait_green skips the '

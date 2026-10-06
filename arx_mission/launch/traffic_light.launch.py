@@ -46,8 +46,13 @@ def generate_launch_description():
 
     args = [
         DeclareLaunchArgument(
-            'use_sim_time', default_value='true',
-            description='Follow /clock. The give-up timer is measured on this.'),
+            'use_sim_time', default_value='false',
+            description='Follow /clock. The give-up timer is measured on this. '
+                        'Defaults false: the only publisher of /clock in this '
+                        'stack is the simulator, and a node told to follow a '
+                        'clock that never ticks has timers that never fire - '
+                        'it sits there, with nothing in any log to say why. '
+                        'full.launch.py passes true whenever it starts Gazebo.'),
         DeclareLaunchArgument(
             'always_on', default_value='false',
             description='Run the detector without waiting to be armed, for '

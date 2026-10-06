@@ -298,6 +298,10 @@ def stack(context, *unused_args, **unused_kwargs):
             f'Known: none, {", ".join(sorted(BAYS))}')
 
     sim = LaunchConfiguration('sim')
+    # ARX: and again as a value, because the three spawns below are chosen in
+    # Python rather than by an IfCondition - they are list entries, not nodes.
+    is_sim = LaunchConfiguration('sim').perform(context).lower() in ('true', '1')
+    use_sim_time = LaunchConfiguration('use_sim_time')
     calibration = LaunchConfiguration('calibration')
     debug_image = LaunchConfiguration('debug_image')
 
@@ -322,10 +326,12 @@ def stack(context, *unused_args, **unused_kwargs):
     mission = [
         include('arx_mission', 'mission_control.launch.py',
                 start_stage=preset['stage'],
-                spawn_yaw_deg=preset['yaw']),
+                spawn_yaw_deg=preset['yaw'],
+                use_sim_time=use_sim_time),
         # Both detectors idle until mission_control arms them, so their
         # position in the order only has to be after the camera pipeline.
-        include('arx_mission', 'traffic_light.launch.py'),
+        include('arx_mission', 'traffic_light.launch.py',
+                use_sim_time=use_sim_time),
         include('arx_mission', 'detect_sign.launch.py'),
         include('arx_mission', 'detect_obstacle.launch.py'),
         include('arx_mission', 'detect_level.launch.py'),
@@ -339,6 +345,18 @@ def stack(context, *unused_args, **unused_kwargs):
     #
     # Within the mission stage the sequencer is first for the same reason: it
     # is what arms the detectors beside it.
+    # ARX: the delays exist to let Gazebo come up - the camera has nothing to
+    # rectify until the simulated one is publishing, and the sequencer has
+    # nothing to drive. On the robot there is no simulator to wait for: the
+    # camera is already running on the Pi before any of this starts. Sixteen
+    # seconds is 5% of the five minutes a run is allowed.
+    #
+    # Not zero even so. The stages still have to come up in order, and a node
+    # that subscribes before its publisher exists misses the first messages.
+    t_turn, t_block, t_roof, t_camera, t_mission, t_lane = (
+        (6.0, 7.0, 7.5, 8.0, 14.0, 16.0) if is_sim else
+        (0.0, 0.0, 0.0, 0.5, 2.0, 3.0))
+
     return [
         # Before the simulator, so the spawn reads them.
         SetLaunchConfiguration('x_pose', preset['x']),
@@ -349,16 +367,16 @@ def stack(context, *unused_args, **unused_kwargs):
         # puts the robot there, and a teleport that changes nothing is still
         # a teleport. After the spawn and well before anything can drive:
         # control_lane is not up until 16 s, and starts held even then.
-        *([TimerAction(period=6.0, actions=[turn_robot(preset)])]
-          if float(preset['yaw']) else []),
+        *([TimerAction(period=t_turn, actions=[turn_robot(preset)])]
+          if is_sim and float(preset['yaw']) else []),
         # After the robot's own spawn, so the two creates cannot race for the
         # same world.
-        *([TimerAction(period=7.0, actions=[block_bay(blocked)])]
-          if blocked != 'none' else []),
-        *([TimerAction(period=7.5, actions=[build_roof()])] if roof else []),
-        TimerAction(period=8.0, actions=camera),
-        TimerAction(period=14.0, actions=mission),
-        TimerAction(period=16.0, actions=lane),
+        *([TimerAction(period=t_block, actions=[block_bay(blocked)])]
+          if is_sim and blocked != 'none' else []),
+        *([TimerAction(period=t_roof, actions=[build_roof()])] if is_sim and roof else []),
+        TimerAction(period=t_camera, actions=camera),
+        TimerAction(period=t_mission, actions=mission),
+        TimerAction(period=t_lane, actions=lane),
     ]
 
 
@@ -380,6 +398,29 @@ def generate_launch_description():
                                           + ', '.join(sorted(BAYS))),
         DeclareLaunchArgument('sim', default_value='true',
                               description='Start the Gazebo simulator too.'),
+        # ARX: false, deliberately, even though sim defaults true and the only
+        # publisher of /clock in this stack is the simulator.
+        #
+        # It used to be true in mission_control.launch.py and
+        # traffic_light.launch.py, and nothing ever passed it, so on the robot
+        # their clocks stayed at zero and their timers never fired. The robot
+        # sat still with nothing in any log to say why: a node waiting on a
+        # clock that never ticks is not a node in trouble, it is a node being
+        # patient. That is the worst way for a default to be wrong, so the
+        # default now fails the other way.
+        #
+        # What it costs in simulation: every give_up_s in mission.yaml - there
+        # are eighteen, from 20 to 120 seconds - is then measured on the wall
+        # rather than on the simulator. They expire early by however much
+        # Gazebo is running behind real time, which with a camera in the world
+        # is not nothing. Pass use_sim_time:=true for a run where those
+        # timeouts have to mean what they say.
+        DeclareLaunchArgument('use_sim_time', default_value='false',
+                              description='Follow /clock, which only the '
+                                          'simulator publishes. Leave false on '
+                                          'the robot. sim:=true runs want '
+                                          'use_sim_time:=true as well if their '
+                                          'give_up_s timeouts are to be exact.'),
         DeclareLaunchArgument('calibration', default_value='false',
                               description='detect_lane in calibration mode.'),
         DeclareLaunchArgument('debug_image', default_value='false',

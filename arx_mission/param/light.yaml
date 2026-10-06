@@ -13,35 +13,62 @@
 /**:
   ros__parameters:
 
-    # Carried over from turtlebot3_autorace_detect/param/traffic_light.
+    # Dragged in rqt_reconfigure against the real camera and saved from the
+    # running node, 2026-10-06, with the camera on ae=false exposure_us=8000
+    # gain=2.0. They began as a copy of
+    # turtlebot3_autorace_detect/param/traffic_light.
     #
-    # Two things to know before trusting these on the real course:
-    #   * red 0-24 misses the wrap-around. True red straddles hue 0 and 179,
-    #     so a real lamp landing at 160-179 is invisible to this band.
-    #   * red 0-24 and yellow 19-33 overlap, so a yellow lamp can satisfy
-    #     both. The detector therefore tests green last and lets it win -
-    #     "is it green yet" is the only question the mission asks.
+    # 🔴 A first pass, not a measurement. Three of these do not look like a
+    # lamp and should be checked before any run depends on them:
+    #
+    #   * red saturation 0-255 is no constraint at all, so grey passes the
+    #     saturation test and only hue 0-16 and value 29-134 are deciding.
+    #     A value ceiling of 134 is dim for something emitting light.
+    #   * yellow hue 0-173 is all but the far end of the wheel. Whatever it
+    #     is separating, it is not hue.
+    #   * red hue 0-16 still misses the wrap. True red straddles 0 and 179,
+    #     so a lamp landing at 160-179 is invisible to this band. Fixing that
+    #     needs two ranges OR'd, the way detect_level.py:231-239 does it.
+    #
+    # The detector tests green last and lets it win, so an overlap between red
+    # and yellow costs nothing while "is it green yet" is the only question
+    # the mission asks.
     red:
       hue_l: 0
-      hue_h: 24
-      saturation_l: 200
+      hue_h: 16
+      saturation_l: 0
       saturation_h: 255
-      lightness_l: 200
-      lightness_h: 255
+      lightness_l: 29
+      lightness_h: 134
     yellow:
-      hue_l: 19
-      hue_h: 33
-      saturation_l: 237
-      saturation_h: 255
-      lightness_l: 231
-      lightness_h: 255
+      hue_l: 0
+      hue_h: 173
+      saturation_l: 111
+      saturation_h: 244
+      lightness_l: 120
+      lightness_h: 171
     green:
-      hue_l: 40
-      hue_h: 113
-      saturation_l: 210
-      saturation_h: 255
-      lightness_l: 131
-      lightness_h: 255
+      hue_l: 59
+      hue_h: 86
+      saturation_l: 86
+      saturation_h: 166
+      lightness_l: 58
+      lightness_h: 98
+
+    # The box a blob has to land in to count, in pixels of the 320x240 input.
+    # These four were four expressions inside find_circle_of_traffic_light -
+    # width // 2, width, height // 3, 2 * height // 3 - and these are what they
+    # evaluated to, so the detector behaves exactly as it did.
+    #
+    # They are parameters because the gate is positional, not chromatic: a lamp
+    # with the colour right and the position wrong reports nothing at all, and
+    # every image downstream looks like a colour problem. Adjustable live from
+    # rqt_reconfigure, and drawn on all four debug images.
+    roi:
+      x_min: 245
+      x_max: 264
+      y_min: 67
+      y_max: 115
 
     # 0 = look at every frame. The original dropped two frames in three,
     # which turns a 10 fps camera into 3.3 fps and makes each frame of

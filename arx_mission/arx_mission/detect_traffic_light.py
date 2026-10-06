@@ -64,6 +64,30 @@ class DetectTrafficLight(Node):
             description='Saturation/Lightness Value (0~255)'
         )
 
+        # ARX: the roi is a parameter now. It used to be four expressions
+        # buried in find_circle_of_traffic_light - width // 2, width,
+        # height // 3, 2 * height // 3 - which on the 320x240 frame this stack
+        # runs come out as 160, 320, 80, 160. Those are the defaults here, so
+        # nothing moves until someone moves it.
+        #
+        # Ranges are the frame, not a round number above it, so the slider's
+        # whole travel lands on pixels that exist. Every stage of this pipeline
+        # is fixed at 320x240 - camera.launch.py asks for it and
+        # image_projection hardcodes 160/180/120 - so there is no larger frame
+        # to reach.
+        parameter_descriptor_roi_x = ParameterDescriptor(
+            integer_range=[IntegerRange(from_value=0, to_value=320, step=1)],
+            description='ROI edge, pixels across a 320 wide frame'
+        )
+        parameter_descriptor_roi_y = ParameterDescriptor(
+            integer_range=[IntegerRange(from_value=0, to_value=240, step=1)],
+            description='ROI edge, pixels down a 240 tall frame'
+        )
+        self.declare_parameter('roi.x_min', 160, parameter_descriptor_roi_x)
+        self.declare_parameter('roi.x_max', 320, parameter_descriptor_roi_x)
+        self.declare_parameter('roi.y_min', 80, parameter_descriptor_roi_y)
+        self.declare_parameter('roi.y_max', 160, parameter_descriptor_roi_y)
+
         self.declare_parameter(
             'red.hue_l', 0, parameter_descriptor_hue)
         self.declare_parameter(
@@ -152,6 +176,11 @@ class DetectTrafficLight(Node):
         self.lightness_green_h = self.get_parameter(
             'green.lightness_h').get_parameter_value().integer_value
 
+        self.roi_x_min = self.get_parameter('roi.x_min').value
+        self.roi_x_max = self.get_parameter('roi.x_max').value
+        self.roi_y_min = self.get_parameter('roi.y_min').value
+        self.roi_y_max = self.get_parameter('roi.y_max').value
+
         self.is_calibration_mode = self.get_parameter(
             'is_calibration_mode').get_parameter_value().bool_value
         # ARX: registered unconditionally. The original only does this in
@@ -213,6 +242,12 @@ class DetectTrafficLight(Node):
         self.armed = MISSION_NONE
         self.state = LIGHT_UNKNOWN
 
+        # ARX: every blob the detector found this frame, and whether it landed
+        # inside the roi. Collected only while the debug image is on - see
+        # find_traffic_light.
+        self.debug_image = False
+        self.blobs = []
+
         # ARX: built once. The original rebuilds these params and the detector
         # three times per frame, once per colour.
         params = cv2.SimpleBlobDetector_Params()
@@ -231,7 +266,11 @@ class DetectTrafficLight(Node):
 
     def get_detect_traffic_light_param(self, params):
         for param in params:
-            if param.name == 'red.hue_l':
+            # ARX: the roi, so it can be dragged while watching the masks.
+            if param.name.startswith('roi.'):
+                setattr(self, 'roi_' + param.name[4:], param.value)
+                self.get_logger().info(f'{param.name} set to: {param.value}')
+            elif param.name == 'red.hue_l':
                 self.hue_red_l = param.value
                 self.get_logger().info(f'red.hue_l set to: {param.value}')
             elif param.name == 'red.hue_h':
@@ -334,6 +373,11 @@ class DetectTrafficLight(Node):
         # while "is it green yet" is the only question the mission asks.
         state = LIGHT_UNKNOWN
 
+        # ARX: read once per frame rather than once per colour, and clear the
+        # blob list the three find_circle_of_traffic_light calls append to.
+        self.debug_image = self.get_parameter('publish_debug_image').value
+        self.blobs = []
+
         cv_image_mask_red = self.mask_red_traffic_light(hsv)
         cv_image_mask_red = cv2.GaussianBlur(cv_image_mask_red, (5, 5), 0)
         detect_red = self.find_circle_of_traffic_light(cv_image_mask_red, 'red')
@@ -368,8 +412,25 @@ class DetectTrafficLight(Node):
         msg_state.data = int(state)
         self.pub_traffic_light.publish(msg_state)
 
-        if not self.get_parameter('publish_debug_image').value:
+        if not self.debug_image:
             return             # ARX: skip the jpeg nobody asked for
+
+        # ARX: the roi gate is invisible otherwise. find_circle_of_traffic_light
+        # rejects any blob outside this box, and nothing downstream says so: the
+        # mask still shows a clean circle and /arx/traffic_light still reads 0,
+        # which looks exactly like a threshold that needs widening and is not
+        # one. draw_roi reads the same four parameters the gate does, so the box
+        # drawn and the box enforced cannot drift apart.
+        self.cv_image = self.draw_roi(self.cv_image, (255, 0, 255))
+        for x, y, size, inside in self.blobs:
+            r = max(3, size // 2)
+            if inside:
+                cv2.circle(self.cv_image, (x, y), r, (0, 255, 0), 2)
+            else:
+                # Hollow and grey: found, and thrown away for where it was.
+                cv2.circle(self.cv_image, (x, y), r, (160, 160, 160), 1)
+                cv2.drawMarker(self.cv_image, (x, y), (160, 160, 160),
+                               cv2.MARKER_TILTED_CROSS, 6, 1)
 
         if self.pub_image_type == 'compressed':
             self.pub_image_traffic_light.publish(
@@ -386,12 +447,19 @@ class DetectTrafficLight(Node):
         mask = cv2.inRange(hsv, lower_red, upper_red)
 
         if self.is_calibration_mode:
+            # ARX: the roi on the mask as well. Tuning happens here - this is
+            # the image that shows whether a threshold caught the lamp - and
+            # without the box there is no way to see that a perfectly good blob
+            # is going to be thrown away for sitting outside it. Mid grey, so it
+            # reads against both the white of the mask and the black around it.
+            # draw_roi copies, so the array below is untouched.
+            shown = self.draw_roi(mask, 128)
             if self.pub_image_type == 'compressed':
                 self.pub_image_red_light.publish(
-                    self.cvBridge.cv2_to_compressed_imgmsg(mask, 'jpg'))
+                    self.cvBridge.cv2_to_compressed_imgmsg(shown, 'jpg'))
             else:
                 self.pub_image_red_light.publish(
-                    self.cvBridge.cv2_to_imgmsg(mask, 'mono8'))
+                    self.cvBridge.cv2_to_imgmsg(shown, 'mono8'))
 
         mask = cv2.bitwise_not(mask)
         return mask
@@ -408,12 +476,19 @@ class DetectTrafficLight(Node):
         mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
 
         if self.is_calibration_mode:
+            # ARX: the roi on the mask as well. Tuning happens here - this is
+            # the image that shows whether a threshold caught the lamp - and
+            # without the box there is no way to see that a perfectly good blob
+            # is going to be thrown away for sitting outside it. Mid grey, so it
+            # reads against both the white of the mask and the black around it.
+            # draw_roi copies, so the array below is untouched.
+            shown = self.draw_roi(mask, 128)
             if self.pub_image_type == 'compressed':
                 self.pub_image_yellow_light.publish(
-                    self.cvBridge.cv2_to_compressed_imgmsg(mask, 'jpg'))
+                    self.cvBridge.cv2_to_compressed_imgmsg(shown, 'jpg'))
             else:
                 self.pub_image_yellow_light.publish(
-                    self.cvBridge.cv2_to_imgmsg(mask, 'mono8'))
+                    self.cvBridge.cv2_to_imgmsg(shown, 'mono8'))
 
         mask = cv2.bitwise_not(mask)
         return mask
@@ -426,26 +501,46 @@ class DetectTrafficLight(Node):
         mask = cv2.inRange(hsv, lower_green, upper_green)
 
         if self.is_calibration_mode:
+            # ARX: the roi on the mask as well. Tuning happens here - this is
+            # the image that shows whether a threshold caught the lamp - and
+            # without the box there is no way to see that a perfectly good blob
+            # is going to be thrown away for sitting outside it. Mid grey, so it
+            # reads against both the white of the mask and the black around it.
+            # draw_roi copies, so the array below is untouched.
+            shown = self.draw_roi(mask, 128)
             if self.pub_image_type == 'compressed':
                 self.pub_image_green_light.publish(
-                    self.cvBridge.cv2_to_compressed_imgmsg(mask, 'jpg'))
+                    self.cvBridge.cv2_to_compressed_imgmsg(shown, 'jpg'))
             else:
                 self.pub_image_green_light.publish(
-                    self.cvBridge.cv2_to_imgmsg(mask, 'mono8'))
+                    self.cvBridge.cv2_to_imgmsg(shown, 'mono8'))
 
         mask = cv2.bitwise_not(mask)
         return mask
+
+    def draw_roi(self, image, color):
+        """Draw the roi on a copy of an image, and return the copy (ARX).
+
+        A copy because two of the three callers hand their mask straight to
+        the blob detector afterwards: a rectangle drawn into that array is a
+        shape the detector would go on to find.
+        """
+        out = image.copy()
+        x0, x1 = sorted((self.roi_x_min, self.roi_x_max))
+        y0, y1 = sorted((self.roi_y_min, self.roi_y_max))
+        cv2.rectangle(out, (x0, y0), (x1 - 1, y1 - 1), color, 1)
+        return out
 
     def find_circle_of_traffic_light(self, mask, color):
         detect_result = False
         # ARX: self.detector, built once in __init__.
         keypts = self.detector.detect(mask)
 
-        height, width = mask.shape[:2]
-        roi_x_start = width // 2
-        roi_x_end = width
-        roi_y_start = height // 3
-        roi_y_end = 2 * height // 3
+        # ARX: from the parameters, and sorted rather than validated. A slider
+        # dragged past its partner is a half-finished gesture, not a mistake to
+        # refuse - rejecting it would make the pair impossible to cross.
+        roi_x_start, roi_x_end = sorted((self.roi_x_min, self.roi_x_max))
+        roi_y_start, roi_y_end = sorted((self.roi_y_min, self.roi_y_max))
 
         # ARX: break on the first keypoint inside the region of interest.
         # The original assigns detect_result on every iteration without
@@ -455,7 +550,14 @@ class DetectTrafficLight(Node):
         for i in range(len(keypts)):
             self.point_x = int(keypts[i].pt[0])
             self.point_y = int(keypts[i].pt[1])
-            if roi_x_start < self.point_x < roi_x_end and roi_y_start < self.point_y < roi_y_end:
+            inside = (roi_x_start < self.point_x < roi_x_end and
+                      roi_y_start < self.point_y < roi_y_end)
+            # ARX: remember it either way. A blob that fails here is the one
+            # worth seeing - nothing else in the output says it existed.
+            if self.debug_image:
+                self.blobs.append(
+                    (self.point_x, self.point_y, int(keypts[i].size), inside))
+            if inside:
                 detect_result = True
                 break
 

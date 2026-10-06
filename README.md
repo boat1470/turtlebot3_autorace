@@ -39,3 +39,25 @@
 ### Community & Support
 - 💬 **[ROBOTIS Community Forum](https://forum.robotis.com/)**
 - 💬 **[TurtleBot category from ROS Community](https://discourse.ros.org/c/turtlebot/)**
+
+
+สาเหตุที่ทำให้ Gazebo ค้าง
+Ctrl+C ที่ launch ไม่ได้ฆ่า gz sim -s (server) เสมอ เพราะมันเป็น process ลูกที่ launch ปล่อยไว้ — เป็นพฤติกรรมที่พบบ่อยกับ ros_gz_sim
+
+นิสัยที่ควรติด: ทุกครั้งหลัง Ctrl+C ให้เช็ค
+
+
+pgrep -af "gz sim"
+ถ้ายังมีเหลือ ให้ pkill -f "gz sim" ก่อน launch ใหม่ทุกครั้ง
+
+notes/stop.sh --list
+notes/stop.sh
+
+
+
+
+compensation.yaml
+projection.yaml
+
+tune 
+lane.yaml

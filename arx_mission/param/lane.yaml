@@ -1,24 +1,58 @@
 ---
-# arx_mission's detect_lane. HSV bands copied verbatim from
-# turtlebot3_autorace_detect/param/lane/lane.yaml, re-keyed from /detect_lane
-# to the wildcard so a namespace cannot detach them. See light.yaml.
+# arx_mission's detect_lane, re-keyed from /detect_lane to the wildcard so a
+# namespace cannot detach it. See light.yaml.
+#
+# The HSV bands began as a verbatim copy of
+# turtlebot3_autorace_detect/param/lane/lane.yaml. They are measurements off
+# the real camera now; the reasoning is beside each one.
 /**:
   ros__parameters:
     detect:
       lane:
+        # ARX: measured on the real camera and the real mat, 2026-10-04, on
+        # /camera/image_projected with ae=false exposure_us=8000 gain=2.0.
+        # The values they replace came from the example and were written for
+        # the simulator.
+        #
+        #   yellow   H 34-38    S 146-209   V 103-178
+        #   white    H 99-107   S  67-96    V 141-205
+        #   mat      H ~56      S  ~94      V  26-43   (max 43)
+        #
+        # Each threshold sits in the middle of the gap between the two
+        # populations it has to separate.
+        #
+        # The white line is not white. The camera reads a sheet of white
+        # paper as B=119 G=122 R=93, a quarter of the red missing, so the
+        # line comes out at hue 104 - cyan - and at a saturation of 85. The
+        # example's saturation_h of 70 cut it off at the first percentile.
         white:
           hue_l: 0
           hue_h: 179
           saturation_l: 0
-          saturation_h: 70
-          lightness_l: 105
+          # 96 is the highest the line reaches, 146 the lowest the yellow
+          # reaches. Anything between separates them; this is the middle.
+          saturation_h: 120
+          # The mat tops out at 43 and the line starts at 141, so this could
+          # be anywhere in between. It is up at 120 because auto_adjust_white
+          # drives it until the mask holds between 5000 and 35000 pixels, and
+          # 120 lands on 30566 - inside the band, so it does not move on the
+          # first frame. 90 would measure just as well and then ramp.
+          lightness_l: 120
           lightness_h: 255
         yellow:
-          hue_l: 10
-          hue_h: 127
-          saturation_l: 70
+          # 34-38 measured. The example's 10-127 spanned the white line at
+          # 104 as well, so the yellow mask held both lines: its centre of
+          # mass came out at x 525 on a line that sits at x 199. It still
+          # found the right lane_base, because that is an argmax over the
+          # left half only, but every pixel of the white line was being
+          # counted as yellow.
+          hue_l: 20
+          hue_h: 50
+          saturation_l: 120
           saturation_h: 255
-          lightness_l: 95
+          # 103 is the lowest the line reaches, 43 the highest the mat
+          # reaches. auto_adjust_yellow is false, so this one stays put.
+          lightness_l: 75
           lightness_h: 255
 
     lane:
