@@ -107,6 +107,15 @@ class DetectLane(Node):
                 # ARX: the original had no parameters beyond the HSV bands
                 # and the calibration flag. These four were literals or were
                 # bolted onto is_detection_calibration_mode.
+                # ARX: half the lane, in pixels of /camera/image_projected.
+                # Where the centre comes from when only one line is in view,
+                # and it is the other half of the extrinsic calibration: the
+                # lane's width in that image is whatever projection.yaml maps
+                # it to, so the two are one measurement and have to move
+                # together. 297 is half of the 594.9 px measured on the real
+                # course on 2026-10-04; the 280 it replaces was half of the
+                # simulator's.
+                ('lane.half_lane_px', 297),
                 ('lane.frame_skip', 3),
                 ('lane.publish_debug_image', False),
                 ('lane.auto_adjust_white', True),
@@ -591,7 +600,7 @@ class DetectLane(Node):
             lane_fit = np.polyfit(y, x, 2)
             # ARX: keyed by lane. A single shared attribute meant a failed
             # fit on one lane fell back to the other lane's curve, which is
-            # 280 px away by construction.
+            # half a lane away by construction.
             self.lane_fit_bef[left_or_right] = lane_fit
         except Exception:
             lane_fit = self.lane_fit_bef[left_or_right]
@@ -666,6 +675,11 @@ class DetectLane(Node):
         # Reproduced against the unmodified example with eight blank frames
         # after a run of good ones.
         centerx = None
+        # ARX: read once per frame. Every branch below that sees one line
+        # offsets by this; the two-line branch averages instead, so a mismatch
+        # between them makes the centre jump by the difference every time a
+        # line is lost or found - a step the D term turns into a kick.
+        half = self.get_parameter('lane.half_lane_px').value
 
         # ARX: a decided junction overrides everything below. Half a lane
         # width from the chosen line, which is the same arithmetic the
@@ -677,7 +691,7 @@ class DetectLane(Node):
         # curve is ordinary; refusing to steer at all until it comes back
         # would not be.
         if self.follow_side == FOLLOW_YELLOW and has_left:
-            centerx = np.add(self.left_fitx, 280)
+            centerx = np.add(self.left_fitx, half)
             pts_center = np.array([np.transpose(np.vstack([centerx, ploty]))])
             lane_state.data = 1
             cv2.polylines(
@@ -689,7 +703,7 @@ class DetectLane(Node):
                 )
 
         elif self.follow_side == FOLLOW_WHITE and has_right:
-            centerx = np.subtract(self.right_fitx, 280)
+            centerx = np.subtract(self.right_fitx, half)
             pts_center = np.array([np.transpose(np.vstack([centerx, ploty]))])
             lane_state.data = 3
             cv2.polylines(
@@ -720,7 +734,7 @@ class DetectLane(Node):
                 cv2.fillPoly(color_warp, np.int_([pts]), (0, 255, 0))
 
             if has_right and not has_left:  # ARX
-                centerx = np.subtract(self.right_fitx, 280)
+                centerx = np.subtract(self.right_fitx, half)
                 pts_center = np.array([np.transpose(np.vstack([centerx, ploty]))])
 
                 lane_state.data = 3
@@ -734,7 +748,7 @@ class DetectLane(Node):
                     )
 
             if has_left and not has_right:  # ARX
-                centerx = np.add(self.left_fitx, 280)
+                centerx = np.add(self.left_fitx, half)
                 pts_center = np.array([np.transpose(np.vstack([centerx, ploty]))])
 
                 lane_state.data = 1
@@ -749,8 +763,8 @@ class DetectLane(Node):
 
         elif (self.reliability_white_line <= 50 and
                 self.reliability_yellow_line > 50 and
-                has_left):  # ARX: and a left curve to add 280 to
-            centerx = np.add(self.left_fitx, 280)
+                has_left):  # ARX: and a left curve to offset from
+            centerx = np.add(self.left_fitx, half)
             pts_center = np.array([np.transpose(np.vstack([centerx, ploty]))])
 
             lane_state.data = 1
@@ -765,8 +779,8 @@ class DetectLane(Node):
 
         elif (self.reliability_white_line > 50 and
                 self.reliability_yellow_line <= 50 and
-                has_right):  # ARX: and a right curve to subtract 280 from
-            centerx = np.subtract(self.right_fitx, 280)
+                has_right):  # ARX: and a right curve to offset from
+            centerx = np.subtract(self.right_fitx, half)
             pts_center = np.array([np.transpose(np.vstack([centerx, ploty]))])
 
             lane_state.data = 3
