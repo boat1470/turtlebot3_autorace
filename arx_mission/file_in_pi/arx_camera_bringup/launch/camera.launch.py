@@ -153,7 +153,6 @@ def camera(context, *unused_args, **unused_kwargs):
         'width': int(LaunchConfiguration('width').perform(context)),
         'height': int(LaunchConfiguration('height').perform(context)),
         'format': LaunchConfiguration('format').perform(context),
-        'AeEnable': as_bool(context, 'ae'),
         'AwbEnable': as_bool(context, 'awb'),
     }
 
@@ -166,13 +165,46 @@ def camera(context, *unused_args, **unused_kwargs):
 
     # Only meaningful with ae:=false, and only after the right value has been
     # measured in the light the robot will actually run in.
+    #
+    # ARX: libcamera 0.5 has no AeEnable. It was split into ExposureTimeMode
+    # and AnalogueGainMode (0 = auto, 1 = manual), and an AeEnable passed to
+    # camera_ros is not a control any more, so it was dropped without a word.
+    # camera_ros happened to rescue the exposure half -
+    #
+    #     resolve overrides: ExposureTimeMode and ExposureTime must not be
+    #     enabled at the same time. 'ExposureTimeMode' will be set to off.
+    #
+    # - but has no such rule for gain, so AnalogueGainMode stayed 0 and AE
+    # went on choosing the gain while AnalogueGain read back 2.0. Each mode is
+    # set to manual here only alongside its measured value, never on its own.
+    #
+    # Stock camera_ros (c7bb8ef, rel 0.5.1) drops ExposureTime passed here: it
+    # reads back 20000 - the Pi IPA's default - with or without
+    # ExposureTimeMode beside it. The bug is in ParameterConflictHandler.cpp.
+    # resolve_defaults finds the default ExposureTimeMode auto clashing with
+    # the default ExposureTime, so it parks the 20000 in `store` and unsets
+    # it. resolve_overrides only takes it back out when no ExposureTime was
+    # passed, so ours leaves it parked; then restore(), run on the atomic
+    # set, sees ExposureTimeMode manual and appends ExposureTime=20000 after
+    # ours, and the later one wins. Gain has no such rule.
+    #
+    # The Pi carries a three-line fix for it, ../../camera_ros_patches/, and
+    # this file relies on it: reinstall camera_ros without the patch and the
+    # exposure silently goes back to 20000. Check after any reinstall with
+    # `ros2 param get /camera ExposureTime`.
+    manual = not as_bool(context, 'ae')
+
     exposure = int(LaunchConfiguration('exposure_us').perform(context))
     if exposure > 0:
         params['ExposureTime'] = exposure
+        if manual:
+            params['ExposureTimeMode'] = 1   # 0 = auto, 1 = manual
 
     gain = float(LaunchConfiguration('gain').perform(context))
     if gain > 0.0:
         params['AnalogueGain'] = gain
+        if manual:
+            params['AnalogueGainMode'] = 1   # 0 = auto, 1 = manual
 
     nodes = [
         ComposableNode(
@@ -233,8 +265,10 @@ def generate_launch_description() -> LaunchDescription:
                         'says rgb8, use BGR888 instead.'),
         DeclareLaunchArgument(
             'ae', default_value='true',
-            description='Auto exposure. Lock it off before tuning any hue '
-                        'threshold, and pass exposure_us with it.'),
+            description='Auto exposure. false sets ExposureTimeMode and '
+                        'AnalogueGainMode to manual for whichever of '
+                        'exposure_us and gain is given. Lock it off before '
+                        'tuning any hue threshold.'),
         DeclareLaunchArgument(
             'awb', default_value='true',
             description='Auto white balance. On by default and it moves the '

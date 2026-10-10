@@ -1,0 +1,14 @@
+diff --git a/src/ParameterConflictHandler.cpp b/src/ParameterConflictHandler.cpp
+index c4c4a4b..0f2b5a0 100644
+--- a/src/ParameterConflictHandler.cpp
++++ b/src/ParameterConflictHandler.cpp
+@@ -139,6 +139,9 @@ ParameterConflictHandler::resolve_overrides(ParameterValueMap &p)
+     p.at(ET) = store.at(ET);
+     store.erase(ET);
+   }
++  // an explicit 'ExposureTime' override replaces the stored default
++  if (is_set(p, ET))
++    store.erase(ET);
+   return msgs;
+ }
+ 
