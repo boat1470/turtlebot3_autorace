@@ -69,21 +69,28 @@ ARX: three changes, all measured against this camera.
 
    bgr8 is right. rgb8 means use format:=BGR888 instead.
 
-3. Exposure, white balance and sharpness exposed, all defaulting to the
-   camera's own behaviour.
+3. Exposure, white balance and sharpness exposed, defaulting to the set
+   measured in the practice room on 2026-10-10.
 
    The simulator has no auto-exposure and no auto-white-balance, so every
    HSV threshold in this package was tuned against a camera whose colour
    response does not move. On this one AwbEnable is on by default and will
    shift the hue of the lane lines with whatever else is in frame.
 
-   They default to leaving the camera alone, because locking exposure
-   without a measured value for it gives a black frame. Measure first, then
-   pass them - and write the numbers down, because every threshold tuned
-   afterwards is only valid under them.
+   Every HSV threshold tuned afterwards is only valid under these numbers,
+   so they are the defaults rather than something to remember to type:
+
+       exposure_us 30000   gain 9.0   colour_gains [1.57, 1.51]
+       awb false           sharpness 0.0
+
+   Measured with calibrate_ui/roi_probe.py on white paper lying flat on the
+   mat under the ceiling lights: max 187-200, B/G/R 180/176/178. The room
+   is dim, hence the gain. Another room needs them measured again
+   (docs/camera_setup_steps.html, steps 3-4), and passed on the command line
+   until they replace these. To hand the camera back to its own automatics:
 
        ros2 launch arx_camera_bringup camera.launch.py \\
-           ae:=false awb:=false sharpness:=0.0 exposure_us:=8000 gain:=2.0
+           ae:=true awb:=true exposure_us:=0 gain:=0.0 sharpness:=-1.0
 
 Frame rate is not set here. camera_ros tries and fails on its own -
 
@@ -206,6 +213,14 @@ def camera(context, *unused_args, **unused_kwargs):
         if manual:
             params['AnalogueGainMode'] = 1   # 0 = auto, 1 = manual
 
+    # ARX: [red, blue]; green is fixed at 1. libcamera applies them only while
+    # AwbEnable is false. Empty leaves them alone - camera_ros cannot give
+    # this two-element control a default, so the camera then keeps whatever
+    # AWB last worked out, which is not the same from one launch to the next.
+    colour = LaunchConfiguration('colour_gains').perform(context).strip('[] ')
+    if colour:
+        params['ColourGains'] = [float(v) for v in colour.split(',')]
+
     nodes = [
         ComposableNode(
             package='camera_ros',
@@ -264,27 +279,31 @@ def generate_launch_description() -> LaunchDescription:
                         '/camera/image_raw --once --field encoding`; if it '
                         'says rgb8, use BGR888 instead.'),
         DeclareLaunchArgument(
-            'ae', default_value='true',
+            'ae', default_value='false',
             description='Auto exposure. false sets ExposureTimeMode and '
                         'AnalogueGainMode to manual for whichever of '
                         'exposure_us and gain is given. Lock it off before '
                         'tuning any hue threshold.'),
         DeclareLaunchArgument(
-            'awb', default_value='true',
-            description='Auto white balance. On by default and it moves the '
-                        'hue of the lane lines with whatever is in frame; '
-                        'the simulator has no such thing.'),
+            'awb', default_value='false',
+            description='Auto white balance. Left on, it moves the hue of '
+                        'the lane lines with whatever is in frame; the '
+                        'simulator has no such thing. Off uses colour_gains.'),
         DeclareLaunchArgument(
-            'sharpness', default_value='-1.0',
+            'colour_gains', default_value='[1.57, 1.51]',
+            description='"[red, blue]" ColourGains, used while awb is false. '
+                        'Empty leaves them alone.'),
+        DeclareLaunchArgument(
+            'sharpness', default_value='0.0',
             description='Negative leaves it alone. 0.0 turns sharpening off, '
                         'which is what measuring focus wants - sharpening '
                         'inflates any sharpness metric.'),
         DeclareLaunchArgument(
-            'exposure_us', default_value='0',
+            'exposure_us', default_value='30000',
             description='Microseconds. 0 leaves it alone. Only meaningful '
                         'with ae:=false, and only once measured.'),
         DeclareLaunchArgument(
-            'gain', default_value='0.0',
+            'gain', default_value='9.0',
             description='Analogue gain. 0 leaves it alone.'),
         DeclareLaunchArgument(
             'use_image_view', default_value='false',
