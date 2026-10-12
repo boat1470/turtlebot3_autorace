@@ -116,6 +116,33 @@ class ControlLane(Node):
         # message and the next. The backstop for smoothness whatever the
         # error does; 0 turns it off.
         self.declare_parameter('control.max_angular_step', 0.35)
+        # ARX: scale kp and max_angular_step with the speed being driven.
+        # kp alone gives omega = kp x error whatever the speed, and the radius
+        # the robot actually turns on is v / omega - so a gain tuned at one
+        # speed runs wide at any higher one, which is what happened at 17B
+        # and the U-turns once max_vel went up. Scaling kp by v / speed_ref
+        # keeps the radius for a given error the same at every speed.
+        # speed_ref is the speed the gains were tuned at; 0 turns this off.
+        # kd is not scaled: what bounds it is measurement noise, not speed.
+        self.declare_parameter('control.speed_ref', 0.0)
+        # ARX: take the speed term's error from /detect/lane_ahead, a second
+        # centre detect_lane reads further up the frame (lane.speed_row),
+        # when it is fresher than this. The near row that steers is the one
+        # that stopped the robot cutting corners, but it also sees a curve
+        # late, so braking from it alone is late. The larger of the two
+        # errors sets the speed; the near one alone still steers.
+        self.declare_parameter('control.speed_from_ahead', True)
+        # ARX: how hard the error cuts the speed: max_vel x (1 - e/500) ^ this.
+        # The original's 2.2 has 100 px of error already down to 0.61 x, which
+        # with the gains tuned at 0.07 m/s was what kept the robot inside the
+        # curves. With speed_ref scaling the gain instead, the cut can be
+        # gentler: 1.0 is linear, 1.5 keeps 0.77 x at 100 px.
+        self.declare_parameter('control.slow_power', 2.2),
+        self.declare_parameter('control.ahead_max_age_s', 0.5)
+        self.ahead_error = None
+        self.ahead_time = None
+        self.sub_lane_ahead = self.create_subscription(
+            Float64, '/detect/lane_ahead', self.callback_lane_ahead, 1)
 
         # PD control related variables
         # ARX: None rather than 0 - "no previous sample", so the first
@@ -150,6 +177,11 @@ class ControlLane(Node):
         # against a 300 s limit, before any mission stops are counted.
         self.declare_parameter('speed.max', 0.05)
 
+        ref = self.get_parameter('control.speed_ref').value
+        if ref > 0:
+            self.get_logger().info(
+                f'kp and max_angular_step scale with speed, 1.0 at {ref:.3f} m/s')
+
         # Avoidance mode related variables
         self.avoid_active = False
         self.avoid_twist = Twist()
@@ -172,6 +204,11 @@ class ControlLane(Node):
                 f'max_vel overridden on /control/max_vel: '
                 f'{self.MAX_VEL:.3f} -> {max_vel_msg.data:.3f} m/s')
         self.MAX_VEL = max_vel_msg.data
+
+    def callback_lane_ahead(self, msg):
+        """The lane centre further up the frame, for braking only (ARX)."""
+        self.ahead_error = msg.data - 500
+        self.ahead_time = self.get_clock().now().nanoseconds * 1e-9
 
     def callback_follow_lane(self, desired_center):
         """
@@ -197,18 +234,34 @@ class ControlLane(Node):
             derivative = (error - self.last_error) / dt
         self.last_error = error
 
-        angular_z = (self.get_parameter('control.kp').value * error +
-                     self.get_parameter('control.kd').value * derivative)
+        # ARX: the speed first, because the steering gain scales with it.
+        # Its error is the larger of the near row's and the ahead row's, so a
+        # curve that is still ahead of the steering row already slows the
+        # robot down.
+        speed_error = abs(error)
+        if (self.get_parameter('control.speed_from_ahead').value
+                and self.ahead_time is not None
+                and now - self.ahead_time <= self.get_parameter('control.ahead_max_age_s').value):
+            speed_error = max(speed_error, abs(self.ahead_error))
 
         twist = Twist()
         # Linear velocity: adjust speed based on error (maximum 0.05 limit)
         ceiling = self.get_parameter('speed.max').value      # ARX: was a literal 0.05
         twist.linear.x = min(
-            self.MAX_VEL * (max(1 - abs(error) / 500, 0) ** 2.2), ceiling)
+            self.MAX_VEL * (max(1 - speed_error / 500, 0)
+                            ** self.get_parameter('control.slow_power').value), ceiling)
+
+        # ARX: see control.speed_ref. Floored at 0.04 m/s so a robot slowed
+        # right down by a big error can still steer its way out of it.
+        ref = self.get_parameter('control.speed_ref').value
+        scale = max(twist.linear.x, 0.04) / ref if ref > 0 else 1.0
+
+        angular_z = (self.get_parameter('control.kp').value * scale * error +
+                     self.get_parameter('control.kd').value * derivative)
         angular = -max(angular_z, -2.0) if angular_z < 0 else -min(angular_z, 2.0)
         # ARX: rate limit. Whatever the error does, the wheels are not asked
         # to change what they are doing faster than this.
-        step = self.get_parameter('control.max_angular_step').value
+        step = self.get_parameter('control.max_angular_step').value * scale
         if step > 0 and self.last_angular is not None:
             angular = max(min(angular, self.last_angular + step),
                           self.last_angular - step)

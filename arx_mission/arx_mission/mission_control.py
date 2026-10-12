@@ -571,6 +571,12 @@ class MissionControl(Node):
         # between them, and the turn it was slowed for is done.
         self.declare_parameter('lot.pair_release_ticks', 3)
         self.declare_parameter('control.max_vel', 0.15)
+        # ARX: the speed ceiling while a sign is being hunted - drive_to_sign,
+        # drive_to_construction, drive_to_parking. detect_sign needs 5 of the
+        # last 7 reports to agree, and at speed a board can pass before they
+        # do; slowing these stages alone is cheaper than slowing the course.
+        # 0 leaves the speed alone.
+        self.declare_parameter('speed.sign_hunt', 0.0)
         self.max_vel_want = None       # this tick's override, set by a stage
         self.max_vel_sent = None
         self.max_vel_tick = 0
@@ -1224,6 +1230,12 @@ class MissionControl(Node):
         self.tick_stage(now)
         self.send_max_vel()
 
+    def sign_hunt_speed(self):
+        """Ask for speed.sign_hunt on /control/max_vel, if set (ARX)."""
+        slow = self.get_parameter('speed.sign_hunt').value
+        if slow > 0:
+            self.max_vel_want = slow
+
     def send_max_vel(self):
         """Publish the speed ceiling a stage asked for, or the normal one (ARX).
 
@@ -1319,6 +1331,7 @@ class MissionControl(Node):
         # for one of them in the middle of the course would be worse than
         # anything the light itself can cost.
         self.set_driving(True)
+        self.sign_hunt_speed()
         self.set_follow_side(FOLLOW_AUTO) #kljvsldak
         self.set_avoid(False)
 
@@ -1607,6 +1620,7 @@ class MissionControl(Node):
     def tick_drive_to_construction(self, now):
         """Carry on down the course until the construction sign is read."""
         self.set_driving(True)
+        self.sign_hunt_speed()
         self.set_avoid(False)
         # Still steering by whatever the junction chose. Going back to both
         # lines happens when the sign is read, not on the way to it.
@@ -1964,6 +1978,7 @@ class MissionControl(Node):
         board actually is.
         """
         self.set_driving(True)
+        self.sign_hunt_speed()
         self.set_avoid(False)
         # Keep steering by the line the threading left the robot on.
         #

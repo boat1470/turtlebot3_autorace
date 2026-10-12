@@ -126,6 +126,11 @@ class DetectLane(Node):
                 # published - how far ahead the robot aims. Was a literal 350.
                 # Higher is nearer the robot: cuts corners less, reacts later.
                 ('lane.lookahead_row', 350),
+                # ARX: a second centre, read higher up the frame and published
+                # on /detect/lane_ahead for control_lane to brake on - the
+                # steering row is near, which stopped the corner-cutting, but
+                # near sees a curve late. 0 publishes nothing.
+                ('lane.speed_row', 300),
                 # ARX: drop white pixels left of the yellow line's fit (plus
                 # this margin) before the white line is fitted. A lane's white
                 # line is always right of its yellow one, so anything white
@@ -218,6 +223,13 @@ class DetectLane(Node):
                     )
 
         self.pub_lane = self.create_publisher(Float64, '/detect/lane', 1)
+        self.pub_lane_ahead = self.create_publisher(Float64, '/detect/lane_ahead', 1)
+        # ARX: camera stamp to this node's output, in ms - the perception
+        # half of the control loop (capture on the Pi, compress, Wi-Fi,
+        # rectify, project, this node). Needs the Pi's clock and this one's
+        # to agree (chrony/NTP); a steady negative or many-second value means
+        # they do not, not that the pipeline is fast or slow.
+        self.pub_latency = self.create_publisher(Float64, '/detect/lane_latency_ms', 1)
 
         self.pub_yellow_line_reliability = self.create_publisher(
             UInt8, '/detect/yellow_line_reliability', 1
@@ -274,6 +286,7 @@ class DetectLane(Node):
         # from the white line's fit so the two cannot inherit each other.
         self.right_yellow_fit = None
         self.right_yellow_fitx = None
+        self.last_image_stamp = None
 
     def cbFollowSide(self, msg):
         """Latch which line to steer by (ARX)."""
@@ -334,6 +347,9 @@ class DetectLane(Node):
                 return
             else:
                 self.counter = 1
+
+        st = image_msg.header.stamp
+        self.last_image_stamp = st.sec * 10 ** 9 + st.nanosec if (st.sec or st.nanosec) else None
 
         if self.sub_image_type == 'compressed':
             np_arr = np.frombuffer(image_msg.data, np.uint8)
@@ -910,6 +926,21 @@ class DetectLane(Node):
             aim = (int(centerx.item(row)), row)
             cv2.circle(final, aim, 13, (0, 0, 0), -1)
             cv2.circle(final, aim, 9, (255, 255, 255), -1)
+        # ARX: the braking row, as a hollow ring: where /detect/lane_ahead is
+        # read. See lane.speed_row.
+        speed_row = int(self.get_parameter('lane.speed_row').value)
+        if 0 < speed_row < cv_image.shape[0]:
+            cv2.line(final, (0, speed_row), (cv_image.shape[1] - 1, speed_row), (60, 60, 60), 1)
+            if centerx is not None:
+                cv2.circle(final, (int(centerx.item(speed_row)), speed_row), 10,
+                           (255, 255, 255), 2)
+                self.pub_lane_ahead.publish(Float64(data=float(centerx.item(speed_row))))
+
+        # ARX: see pub_latency. Published once per frame processed.
+        stamp = self.last_image_stamp
+        if stamp is not None:
+            now_ns = self.get_clock().now().nanoseconds
+            self.pub_latency.publish(Float64(data=(now_ns - stamp) / 1e6))
 
         if self.pub_image_type == 'compressed':
             if self.is_center_x_exist:

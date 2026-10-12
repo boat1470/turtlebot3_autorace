@@ -30,7 +30,9 @@ echo` terminals and an rqt_image_view:
                  docs/curve_map.png is, where the robot sets off downwards.
                  The dashed line is --target (default 180, the left script's
                  heading), with how far is left to turn to it
-    Hz           how often /detect/lane arrives
+    Hz           how often /detect/lane arrives, and beside it the camera
+                 stamp -> detect_lane latency in ms (needs the Pi's clock and
+                 this one's in step; "clocks?" flags a value that cannot be)
     sign         the 'sign' image button shows detect_sign's debug image (the
                  frame, with the reference sign and the matched points beside
                  it on a hit); above lane state, which mission is armed and
@@ -121,7 +123,8 @@ class Listener(Node):
                             ('/arx/armed_mission', UInt8),
                             ('/detect/obstacle', UInt8),
                             ('/detect/obstacle_side', UInt8),
-                            ('/detect/front_range', Float32)):
+                            ('/detect/front_range', Float32),
+                            ('/detect/lane_latency_ms', Float64)):
             self.create_subscription(
                 kind, topic, lambda msg, t=topic: self.on_value(t, msg.data), 10)
         self.create_subscription(Odometry, '/odom', self.on_odom, 10)
@@ -423,7 +426,10 @@ class Window:
                      + ('\n(stale)' if stale else ''),
                 fg='#777' if stale else '#30b050' if near else '#e8e8e8')
 
-        self.footer.set(f'/detect/lane  {hz:4.1f} Hz')
+        lat, lat_stale = get('/detect/lane_latency_ms')
+        lat_txt = '' if lat is None else (
+            f'   latency {lat:4.0f} ms' + ('  (clocks?)' if lat < 0 or lat > 5000 else ''))
+        self.footer.set(f'/detect/lane  {hz:4.1f} Hz{lat_txt}')
 
         # mission and sign
         m, m_stale = get('/arx/armed_mission')

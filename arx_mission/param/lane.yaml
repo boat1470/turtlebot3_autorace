@@ -105,6 +105,11 @@
       # right at 480.
       # Not yet checked on the U-turns (19A, 13A) or on the straights.
       lookahead_row: 580
+      # A second centre, read at this row and published on
+      # /detect/lane_ahead, for control_lane to brake on (its
+      # speed_from_ahead). 300 is ~0.19 m ahead of row 580 at 1.49 px/mm.
+      # Drawn as a hollow ring. 0 publishes nothing.
+      speed_row: 300
 
       # Drop white pixels left of the yellow line (plus this margin) before
       # fitting the white one: a lane's white line is always right of its

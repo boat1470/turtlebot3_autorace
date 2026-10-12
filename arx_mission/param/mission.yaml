@@ -53,7 +53,7 @@
       # back to the mean of both lines and no branch is taken. Stopping here is
       # how to see what the camera actually has at that point, and on the real
       # robot it is also the first question - does it see the sign at all.
-      stop_after_detect: false
+      stop_after_detect: false #
 
       # Distance from the start line to the intersection sign is under two
       # metres, which at 0.05 m/s is about 40 s of driving. This is measured
@@ -956,6 +956,24 @@
       # Scaled with the speed, same reason as kp.
       max_angular_step: 0.49
 
+      # kp and max_angular_step scale with the speed being driven, as
+      # v / speed_ref (2026-10-12). omega = kp x error turns on a radius of
+      # v / omega, so the same gain runs wider the faster the robot goes -
+      # 17B and the U-turns, once max_vel went past the 0.07 the gains were
+      # tuned at. 0.07 is that speed; 0 turns the scaling off.
+      speed_ref: 0.07
+      # Brake on the larger of the steering row's error and the one from
+      # /detect/lane_ahead (lane.speed_row in lane.yaml), so a curve still
+      # ahead of the near steering row slows the robot before it arrives.
+      speed_from_ahead: true
+      # How hard the error cuts the speed, max_vel x (1 - e/500) ^ this. The
+      # original 2.2 had 100 px down to 0.61 x. 1.5 keeps 0.77 x there: with
+      # speed_ref scaling the gain, the curve no longer needs the cut to stay
+      # inside. Ladder 2.2 / 1.5 / 1.2, measured START -> sign with
+      # intersection.stop_after_detect true (19.6 s on 2026-10-12 at 2.2,
+      # max_vel 0.15, no speed_ref).
+      slow_power: 1.0
+
       # The ceiling that actually bites first. linear.x is
       #
       #     min(max_vel * (1 - |error|/500) ** 2.2, speed.max)
@@ -969,11 +987,18 @@
       # /control/max_vel overrides this at run time, which is how the level
       # crossing mission is meant to slow the robot; this is the starting
       # value.
-      max_vel: 0.15
+      # 2026-10-12: the ladder with speed_ref on is 0.15 / 0.18 / 0.20 -
+      # stop at the last that holds 19A, 13A, 4B->7A and 12A->13A in the
+      # lane. 0.15 is where the 19.6 s START -> sign was measured.
+      max_vel: 0.20
 
     # The original control_lane hard-codes min(..., 0.05) here. Left at the
     # same value so behaviour is unchanged, but it has to be reachable: the
     # course is 16-18 m, which at 0.05 m/s is 320-360 s against a 300 s
     # limit, before any mission stops are counted.
+    # Speed ceiling while a sign is hunted (drive_to_sign, construction,
+    # parking). 0 = the same as everywhere. Lower this, not max_vel, if a
+    # board passes before detect_sign gets 5 of 7 reports to agree.
     speed:
+      sign_hunt: 0.0
       max: 0.20
