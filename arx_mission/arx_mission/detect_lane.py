@@ -54,7 +54,13 @@ from std_msgs.msg import UInt8
 FOLLOW_AUTO = 0
 FOLLOW_YELLOW = 1
 FOLLOW_WHITE = 2
-SIDE_NAMES = {FOLLOW_AUTO: 'auto', FOLLOW_YELLOW: 'yellow', FOLLOW_WHITE: 'white'}
+# ARX: both lines yellow - the parking lot's way in, which has yellow down
+# both walls. The second yellow line, found in the right half, stands in for
+# the white one; with only one in view it is the yellow line plus half a lane,
+# as FOLLOW_YELLOW.
+FOLLOW_YELLOW_PAIR = 3
+SIDE_NAMES = {FOLLOW_AUTO: 'auto', FOLLOW_YELLOW: 'yellow', FOLLOW_WHITE: 'white',
+              FOLLOW_YELLOW_PAIR: 'yellow pair'}
 
 
 class DetectLane(Node):
@@ -116,6 +122,18 @@ class DetectLane(Node):
                 # course on 2026-10-04; the 280 it replaces was half of the
                 # simulator's.
                 ('lane.half_lane_px', 297),
+                # ARX: the row of /camera/image_projected whose centre is
+                # published - how far ahead the robot aims. Was a literal 350.
+                # Higher is nearer the robot: cuts corners less, reacts later.
+                ('lane.lookahead_row', 350),
+                # ARX: drop white pixels left of the yellow line's fit (plus
+                # this margin) before the white line is fitted. A lane's white
+                # line is always right of its yellow one, so anything white
+                # beyond the yellow is something else - the parking lot's wall
+                # 12 cm past the yellow line between 8A and 10B, which the
+                # white fit locked onto in the 8A turn and then followed.
+                ('lane.white_gate', True),
+                ('lane.white_gate_margin_px', 40),
                 ('lane.frame_skip', 3),
                 ('lane.publish_debug_image', False),
                 ('lane.auto_adjust_white', True),
@@ -251,12 +269,19 @@ class DetectLane(Node):
         self.right_fitx = None
         # ARX: was a single attribute shared by both lanes, so a failed
         # polyfit on one lane fell back to the other lane's curve.
-        self.lane_fit_bef = {'left': None, 'right': None}
+        self.lane_fit_bef = {'left': None, 'right': None, 'right_yellow': None}
+        # ARX: the second yellow line, FOLLOW_YELLOW_PAIR only. Kept apart
+        # from the white line's fit so the two cannot inherit each other.
+        self.right_yellow_fit = None
+        self.right_yellow_fitx = None
 
     def cbFollowSide(self, msg):
         """Latch which line to steer by (ARX)."""
         if msg.data == self.follow_side:
             return
+        if self.follow_side == FOLLOW_YELLOW_PAIR:
+            self.right_yellow_fit = self.right_yellow_fitx = None
+            self.lane_fit_bef['right_yellow'] = None
         self.follow_side = msg.data
         self.get_logger().info(
             'steering by the mean of both lines' if msg.data == FOLLOW_AUTO
@@ -316,7 +341,6 @@ class DetectLane(Node):
         elif self.sub_image_type == 'raw':
             cv_image = self.cvBridge.imgmsg_to_cv2(image_msg, 'bgr8')
 
-        white_fraction, cv_white_lane = self.maskWhiteLane(cv_image)
         yellow_fraction, cv_yellow_lane = self.maskYellowLane(cv_image)
 
         # ARX: one try/except covered both lanes, so a failure while fitting
@@ -326,6 +350,14 @@ class DetectLane(Node):
         # asked directly instead of being inferred from an AttributeError.
         if yellow_fraction > 3000:
             self.fnUpdateLane('left', cv_yellow_lane)
+            if self.follow_side == FOLLOW_YELLOW_PAIR:
+                self.fnUpdateRightYellow(cv_yellow_lane)
+
+        # ARX: the yellow line is fitted first so the white mask can be cut
+        # to the right of it (lane.white_gate) - not in the yellow pair mode,
+        # which has no use for the white line.
+        white_fraction, cv_white_lane = self.maskWhiteLane(
+            cv_image, self.whiteGate(cv_yellow_lane, yellow_fraction))
 
         if white_fraction > 3000:
             self.fnUpdateLane('right', cv_white_lane)
@@ -365,7 +397,28 @@ class DetectLane(Node):
 
         self.make_lane(cv_image, white_fraction, yellow_fraction)
 
-    def maskWhiteLane(self, image):
+    def whiteGate(self, yellow_mask, yellow_fraction):
+        """Per-row x below which white pixels are dropped, or None (ARX).
+
+        Only on the rows the yellow mask actually has pixels on: past them the
+        yellow fit is the polynomial's guess, and a short stretch of the inner
+        line on a curve can send that guess anywhere - including over the
+        white line it is meant to protect.
+        """
+        if (not self.get_parameter('lane.white_gate').value
+                or self.follow_side == FOLLOW_YELLOW_PAIR
+                or yellow_fraction <= 3000 or self.left_fitx is None):
+            return None
+        rows = np.nonzero(yellow_mask.any(axis=1))[0]
+        if len(rows) == 0:
+            return None
+        limit = np.full(yellow_mask.shape[0], -np.inf)
+        y0, y1 = rows.min(), rows.max() + 1
+        margin = self.get_parameter('lane.white_gate_margin_px').value
+        limit[y0:y1] = np.asarray(self.left_fitx[y0:y1]) + margin
+        return limit
+
+    def maskWhiteLane(self, image, gate=None):
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
         Hue_l = self.hue_white_l
@@ -379,6 +432,10 @@ class DetectLane(Node):
         upper_white = np.array([Hue_h, Saturation_h, Lightness_h])
 
         mask = cv2.inRange(hsv, lower_white, upper_white)
+        if gate is not None:
+            # ARX: see whiteGate.
+            cols = np.arange(mask.shape[1])
+            mask[cols[np.newaxis, :] < gate[:, np.newaxis]] = 0
 
         fraction_num = np.count_nonzero(mask)
 
@@ -514,6 +571,20 @@ class DetectLane(Node):
             self.mov_avg_right = (
                 np.append(self.mov_avg_right, row, axis=0) if extend else row)
 
+    def fnUpdateRightYellow(self, image):
+        """Fit the second yellow line, in the right half (ARX, yellow pair).
+
+        Same order as fnUpdateLane - near the last fit, else a fresh sliding
+        window from the right half - without the moving average: it is only
+        ever used for a few seconds at a time.
+        """
+        fitx = None
+        if self.right_yellow_fit is not None:
+            fitx, fit = self.fit_from_lines(self.right_yellow_fit, image)
+        if fitx is None:
+            fitx, fit = self.sliding_windown(image, 'right', key='right_yellow')
+        self.right_yellow_fitx, self.right_yellow_fit = fitx, fit
+
     def fit_from_lines(self, lane_fit, image):
         nonzero = image.nonzero()
         nonzeroy = np.array(nonzero[0])
@@ -542,7 +613,7 @@ class DetectLane(Node):
 
         return lane_fitx, lane_fit
 
-    def sliding_windown(self, img_w, left_or_right):
+    def sliding_windown(self, img_w, left_or_right, key=None):
         histogram = np.sum(img_w[int(img_w.shape[0] / 2):, :], axis=0)
 
         out_img = np.dstack((img_w, img_w, img_w)) * 255
@@ -601,9 +672,9 @@ class DetectLane(Node):
             # ARX: keyed by lane. A single shared attribute meant a failed
             # fit on one lane fell back to the other lane's curve, which is
             # half a lane away by construction.
-            self.lane_fit_bef[left_or_right] = lane_fit
+            self.lane_fit_bef[key or left_or_right] = lane_fit
         except Exception:
-            lane_fit = self.lane_fit_bef[left_or_right]
+            lane_fit = self.lane_fit_bef[key or left_or_right]
             # ARX: and on the very first frame there is nothing to fall back
             # to. The original raised AttributeError here.
             if lane_fit is None:
@@ -635,23 +706,15 @@ class DetectLane(Node):
 
         if has_left:  # ARX
             pts_left = np.array([np.flipud(np.transpose(np.vstack([self.left_fitx, ploty])))])
-            cv2.polylines(
-                color_warp_lines,
-                np.int_([pts_left]),
-                isClosed=False,
-                color=(0, 0, 255),
-                thickness=25
-                )
+            # ARX: drawn opaque onto the finished image below, as the white
+            # line's fit is - added on, red over yellow tape came out orange.
 
         if has_right:  # ARX
             pts_right = np.array([np.transpose(np.vstack([self.right_fitx, ploty]))])
-            cv2.polylines(
-                color_warp_lines,
-                np.int_([pts_right]),
-                isClosed=False,
-                color=(255, 255, 0),
-                thickness=25
-                )
+            # ARX: not drawn here. color_warp_lines is added onto the image,
+            # and anything added onto white tape comes out white, so the fit
+            # vanished into the line it was fitted to. It is drawn opaque and
+            # thin onto the finished image below instead.
 
         self.is_center_x_exist = True
         # ARX: this is the crash. The original set is_center_x_exist True
@@ -680,6 +743,22 @@ class DetectLane(Node):
         # between them makes the centre jump by the difference every time a
         # line is lost or found - a step the D term turns into a kick.
         half = self.get_parameter('lane.half_lane_px').value
+        # ARX: the row the centre is read from - here as well as below, for
+        # the yellow pair's width check.
+        row = int(min(max(self.get_parameter('lane.lookahead_row').value, 0),
+                      cv_image.shape[0] - 1))
+
+        # ARX: the yellow pair. The second yellow line counts only at a lane's
+        # width from the first, give or take 30% - on the road before the lot
+        # the right half can hold pieces of yellow that are not a wall of
+        # anything, and the robot then carries on as FOLLOW_YELLOW.
+        has_right_yellow = (self.follow_side == FOLLOW_YELLOW_PAIR and has_left
+                            and self.right_yellow_fitx is not None)
+        pair = False
+        pair_white = False      # yellow pair, no yellow, white in view
+        if has_right_yellow:
+            gap = self.right_yellow_fitx[row] - self.left_fitx[row]
+            pair = abs(gap - 2 * half) <= 0.3 * 2 * half
 
         # ARX: a decided junction overrides everything below. Half a lane
         # width from the chosen line, which is the same arithmetic the
@@ -690,29 +769,31 @@ class DetectLane(Node):
         # than reporting nothing. Losing sight of it for a few frames on a
         # curve is ordinary; refusing to steer at all until it comes back
         # would not be.
-        if self.follow_side == FOLLOW_YELLOW and has_left:
+        if pair:
+            centerx = np.mean([self.left_fitx, self.right_yellow_fitx], axis=0)
+            pts_center = np.array([np.transpose(np.vstack([centerx, ploty]))])
+            lane_state.data = 2
+
+        elif self.follow_side in (FOLLOW_YELLOW, FOLLOW_YELLOW_PAIR) and has_left:
             centerx = np.add(self.left_fitx, half)
             pts_center = np.array([np.transpose(np.vstack([centerx, ploty]))])
             lane_state.data = 1
-            cv2.polylines(
-                color_warp_lines,
-                np.int_([pts_center]),
-                isClosed=False,
-                color=(0, 255, 255),
-                thickness=12
-                )
 
         elif self.follow_side == FOLLOW_WHITE and has_right:
             centerx = np.subtract(self.right_fitx, half)
             pts_center = np.array([np.transpose(np.vstack([centerx, ploty]))])
             lane_state.data = 3
-            cv2.polylines(
-                color_warp_lines,
-                np.int_([pts_center]),
-                isClosed=False,
-                color=(0, 255, 255),
-                thickness=12
-                )
+
+        elif self.follow_side == FOLLOW_YELLOW_PAIR:
+            # ARX: no yellow in view, and in the yellow pair the white line is
+            # not a lane line - it is the parking lot's wall and dashes, or the
+            # road's edge in the turn at 17B. Steering by it turned the robot
+            # towards whatever white was in view, so no centre is published:
+            # control_lane holds its last command. lane_state still says 3
+            # when white is what is in view, because that is the news - the
+            # yellow walls have ended and the lot has begun - and
+            # mission_control acts on it. 0 when there is nothing at all.
+            pair_white = has_right
 
         elif self.reliability_white_line > 50 and self.reliability_yellow_line > 50:
             if has_right and has_left:  # ARX
@@ -721,14 +802,6 @@ class DetectLane(Node):
                 pts_center = np.array([np.transpose(np.vstack([centerx, ploty]))])
 
                 lane_state.data = 2
-
-                cv2.polylines(
-                    color_warp_lines,
-                    np.int_([pts_center]),
-                    isClosed=False,
-                    color=(0, 255, 255),
-                    thickness=12
-                    )
 
                 # Draw the lane onto the warped blank image
                 cv2.fillPoly(color_warp, np.int_([pts]), (0, 255, 0))
@@ -739,27 +812,11 @@ class DetectLane(Node):
 
                 lane_state.data = 3
 
-                cv2.polylines(
-                    color_warp_lines,
-                    np.int_([pts_center]),
-                    isClosed=False,
-                    color=(0, 255, 255),
-                    thickness=12
-                    )
-
             if has_left and not has_right:  # ARX
                 centerx = np.add(self.left_fitx, half)
                 pts_center = np.array([np.transpose(np.vstack([centerx, ploty]))])
 
                 lane_state.data = 1
-
-                cv2.polylines(
-                    color_warp_lines,
-                    np.int_([pts_center]),
-                    isClosed=False,
-                    color=(0, 255, 255),
-                    thickness=12
-                    )
 
         elif (self.reliability_white_line <= 50 and
                 self.reliability_yellow_line > 50 and
@@ -769,14 +826,6 @@ class DetectLane(Node):
 
             lane_state.data = 1
 
-            cv2.polylines(
-                color_warp_lines,
-                np.int_([pts_center]),
-                isClosed=False,
-                color=(0, 255, 255),
-                thickness=12
-                )
-
         elif (self.reliability_white_line > 50 and
                 self.reliability_yellow_line <= 50 and
                 has_right):  # ARX: and a right curve to offset from
@@ -784,14 +833,6 @@ class DetectLane(Node):
             pts_center = np.array([np.transpose(np.vstack([centerx, ploty]))])
 
             lane_state.data = 3
-
-            cv2.polylines(
-                color_warp_lines,
-                np.int_([pts_center]),
-                isClosed=False,
-                color=(0, 255, 255),
-                thickness=12
-                )
 
         else:
             self.is_center_x_exist = False
@@ -805,7 +846,7 @@ class DetectLane(Node):
         # than reading a name that was never bound.
         if centerx is None:
             self.is_center_x_exist = False
-            lane_state.data = 0
+            lane_state.data = 3 if pair_white else 0
 
         self.pub_lane_state.publish(lane_state)
         # ARX: off by default. This ran on every processed frame at info
@@ -814,15 +855,67 @@ class DetectLane(Node):
         if self.get_parameter('lane.log_lane_state').value:
             self.get_logger().info(f'Lane state: {lane_state.data}')
 
+        # ARX: where the published centre is read, drawn so it can be seen.
+        cv2.line(color_warp_lines, (0, row), (cv_image.shape[1] - 1, row), (80, 80, 80), 2)
+
         # Combine the result with the original image
         final = cv2.addWeighted(cv_image, 1, color_warp, 0.2, 0)
         final = cv2.addWeighted(final, 1, color_warp_lines, 1, 0)
+        # ARX: both fits, opaque and thin enough that the tape shows on both
+        # sides - pink for yellow, dark blue for white - and the aim point as
+        # a white dot ringed in black, last so nothing covers it.
+        PINK, BLUE = (180, 60, 255), (200, 60, 0)
+        if has_left:
+            cv2.polylines(final, np.int_([pts_left]), isClosed=False,
+                          color=PINK, thickness=8)
+        if has_right:
+            cv2.polylines(final, np.int_([pts_right]), isClosed=False,
+                          color=BLUE, thickness=8)
+        if has_right_yellow:
+            # The second yellow line, pink like the first: it is yellow tape.
+            pts_ry = np.int_(np.transpose(np.vstack([self.right_yellow_fitx, ploty])))
+            cv2.polylines(final, [pts_ry], isClosed=False, color=PINK, thickness=8)
+        # ARX: the centre line says where it came from. Solid yellow is the
+        # mean of both lines; dashed in a line's own colour is that one line
+        # plus or minus half a lane - pink from the yellow line, blue from
+        # the white. The corner says the same in words, the text in a lighter
+        # blue so it reads on black. "pinned" is follow_side holding it to
+        # one line while the other may be in view too.
+        if centerx is not None:
+            line_colour, text_colour, dashed, text = {
+                2: ((0, 255, 255), (0, 255, 255), False, '2  BOTH: mean of the two fits'),
+                1: (PINK, PINK, True, f'1  YELLOW + {half}'),
+                3: (BLUE, (255, 160, 80), True, f'3  WHITE - {half}'),
+            }.get(lane_state.data,
+                  ((200, 200, 200), (200, 200, 200), False, str(lane_state.data)))
+            if pair:
+                text = '2  YELLOW PAIR: mean'
+            elif ((self.follow_side in (FOLLOW_YELLOW, FOLLOW_YELLOW_PAIR) and has_left) or
+                    (self.follow_side == FOLLOW_WHITE and has_right)):
+                text += '   [pinned]'
+            pts = np.int_(np.transpose(np.vstack([centerx, ploty])))
+            if dashed:
+                for start in range(0, len(pts) - 1, 40):     # 25 px on, 15 off
+                    cv2.polylines(final, [pts[start:start + 25]], isClosed=False,
+                                  color=line_colour, thickness=6)
+            else:
+                cv2.polylines(final, [pts], isClosed=False, color=line_colour, thickness=6)
+        else:
+            text_colour, text = ((255, 160, 80), '3  WHITE: out of the yellow pair') \
+                if pair_white else ((0, 0, 255), '0  NO LANE')
+        cv2.rectangle(final, (8, 8), (16 + 16 * len(text), 50), (0, 0, 0), -1)
+        cv2.putText(final, text, (16, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, text_colour, 2,
+                    cv2.LINE_AA)
+        if centerx is not None:
+            aim = (int(centerx.item(row)), row)
+            cv2.circle(final, aim, 13, (0, 0, 0), -1)
+            cv2.circle(final, aim, 9, (255, 255, 255), -1)
 
         if self.pub_image_type == 'compressed':
             if self.is_center_x_exist:
                 # publishes lane center
                 msg_desired_center = Float64()
-                msg_desired_center.data = centerx.item(350)
+                msg_desired_center.data = centerx.item(row)
                 self.pub_lane.publish(msg_desired_center)
 
             self.pub_image_lane.publish(self.cvBridge.cv2_to_compressed_imgmsg(final, 'jpg'))
@@ -831,7 +924,7 @@ class DetectLane(Node):
             if self.is_center_x_exist:
                 # publishes lane center
                 msg_desired_center = Float64()
-                msg_desired_center.data = centerx.item(350)
+                msg_desired_center.data = centerx.item(row)
                 self.pub_lane.publish(msg_desired_center)
 
             self.pub_image_lane.publish(self.cvBridge.cv2_to_imgmsg(final, 'bgr8'))

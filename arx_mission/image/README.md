@@ -1,4 +1,46 @@
-# Reference signs, cut from this simulator's own camera
+# Reference signs
+
+`left.png` and `right.png` are the real robot's, cut 2026-10-07 from
+`/camera/image_compensated` with the camera on `ae=false exposure_us=8000
+gain=2.0`. `construction.png` and `parking.png` are still the simulator's.
+The simulator's four are kept whole in `../image_sim/`, with the notes that
+were written for them; everything below this paragraph is about those.
+
+The real sign is not the shape the simulator renders. Here it is a blue disc
+on a white board, where the simulator draws a board that is blue all over, so
+the old pair could never have matched whatever the lighting. detect_sign runs
+SIFT over the whole frame with no colour step before it, so the change of
+shape costs nothing but the references.
+
+Cut to the blue disc and a little white, and deliberately not down to the
+black post below it: both arrows carry the same post, so its descriptors
+would be shared between the two references and dilute the only part that
+tells them apart.
+
+    left.png    blue disc 55 px across in frame,  29 descriptors
+    right.png   blue disc 91 px across in frame,  32 descriptors
+
+Thinner than the simulator's 56 and 59, and that is the sign itself rather
+than the camera: a crisp two-colour print gives SIFT corners at the arrow and
+very little else, where the renderer's surface noise gave it more. It does not
+cost anything in the comparison, because the published score is inliers over
+the reference's own descriptor count.
+
+Measured with `notes/sign_probe.py --image-dir`, at the distance each was cut
+from:
+
+    in front of the left sign    left 0.29-0.48   right 0.05-0.15   all LEFT
+    in front of the right sign   left 0.13-0.29   right 0.42-0.64   all RIGHT
+
+Still to do: grade both on frames they were *not* cut from, which is the test
+that matters and the one the section below explains. The margin in front of
+the right sign is 2.3x where the left sign's is 3.5x - the two arrows share a
+disc, a white surround and a mirrored glyph, so they have a great deal in
+common for SIFT to agree on.
+
+---
+
+# Below: the simulator's set, and how it was arrived at
 
 `left.png` and `right.png` are crops of the arrow board as
 `/camera/image_compensated` renders it, taken with the robot 0.22 m from the

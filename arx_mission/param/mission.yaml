@@ -6,7 +6,7 @@
     rate_hz: 10.0
 
     light:
-      enabled: true #เริ่มโดยการรอไฟแดงไหม
+      enabled: false #เริ่มโดยการรอไฟแดงไหม
       # Frames of green, not ticks. Three frames at 10 fps is 0.3 s.
       confirm_frames: 3
       # Act on the change to green, not on a green that was already burning
@@ -41,13 +41,18 @@
 
       # Stop where the arrow was identified instead of acting on it.
       #
+      # 🔴 ON, for bench testing on the real robot. A run with this true stops
+      # at the junction and stays there, which fails the mission. Put it back
+      # to false before anything that is meant to score.
+      #
       # With this false the robot carries on and steers by the line the arrow
       # chose - yellow for left, white for right - for the rest of the run.
-      # That is the finished behaviour, and it is currently off: driving on
-      # showed the chosen line is often not yet in frame at the moment the
-      # arrow is confirmed, so the steering falls straight back to the mean
-      # of both lines and no branch is taken. Stopping here is how to see
-      # what the camera actually has at that point.
+      # That is the finished behaviour, and it was off while that was being
+      # worked on: driving on showed the chosen line is often not yet in frame
+      # at the moment the arrow is confirmed, so the steering falls straight
+      # back to the mean of both lines and no branch is taken. Stopping here is
+      # how to see what the camera actually has at that point, and on the real
+      # robot it is also the first question - does it see the sign at all.
       stop_after_detect: false
 
       # Distance from the start line to the intersection sign is under two
@@ -68,6 +73,51 @@
       # at the line: a 0.41 m turning radius needing 0.64 m of travel to come
       # round 90 degrees, which the junction does not give it.
       follow_chosen_line: true
+
+      # A right arrow, after its turn, until the construction sign: true =
+      # the white line alone (white - half_lane_px), false = auto, the mean
+      # of both lines. Only means anything with follow_chosen_line true -
+      # false there is auto for both arrows already. The left arrow has its
+      # own switch, left_script.follow_yellow_after.
+      right_follow_white_after: true
+
+      # A left arrow is driven by a fixed script instead of `turn` below
+      # (2026-10-11): on the real course the yellow line of the left branch
+      # is not in frame where the arrow is confirmed, so there is nothing to
+      # follow yet. In order:
+      #
+      #   1. turn on the spot to face heading_deg
+      #   2. forward first_m
+      #   3. turn turn_deg on the spot (+ is left)
+      #   4. forward second_m
+      #
+      # then steer by the yellow line whatever follow_chosen_line says.
+      # A right arrow still uses `turn`.
+      #
+      # heading_deg is a world angle, 0 = the way the robot faced when
+      # robot.launch.py came up - so bring the robot up on the start line,
+      # facing along it, or this heading means something else.
+      left_script:
+        enabled: true
+        heading_deg: 180.0
+        heading_tolerance_deg: 3.0
+        first_m: 0.30
+        turn_deg: 90.0
+        second_m: 0.0
+        rate: 0.4            # rad/s on the spot
+        speed: 0.05          # m/s on the straights
+        slow_within_deg: 10.0
+        # Per step: a step that has not finished by then is skipped.
+        step_give_up_s: 15.0
+        # Stop where the script ends instead of following the yellow line -
+        # to see where the four moves actually put the robot. The robot
+        # stays stopped, which fails the run: false before anything scored.
+        stop_after: false
+        # What to steer by once the script is done, until the construction
+        # sign: true = the yellow line alone (yellow + half_lane_px), false =
+        # auto, the mean of both lines, one line + half_lane_px when only
+        # one is in view.
+        follow_yellow_after: true
 
       turn:
         # How far to turn once the arrow is known, per side. Positive is
@@ -289,7 +339,7 @@
           # Straight run right after the on-the-spot turn, while the robot is
           # pointing across the corridor. Turning on the spot makes no
           # sideways progress of its own, so this is where it comes from.
-          out_m: 0.10
+          out_m: 0.20
 
           # Turn on the spot instead of arcing round the board.
           #
@@ -336,6 +386,23 @@
           # other reason. Yaw against the heading lane following had says
           # the same thing and can be measured.
           swing_deg: 90.0
+
+          # 2026-10-12: swing to fixed odom headings instead of swing_deg off
+          # whatever heading the robot had when the board was seen - a skew
+          # lane following left then was carried into every turn after it.
+          # Odom 0 is the way the robot faced at bringup (down the map);
+          # the zone runs at +90, and the first board met while hugging
+          # white is B2, gone round on the left: 180. The other swing of a
+          # double swerve mirrors it, to 0. false = swing_deg as before.
+          absolute: true
+          corridor_heading_deg: 90.0
+          swing_heading_deg: 180.0
+          # Slow the on-the-spot turn over its last this-many degrees (to a
+          # quarter of in_place_rate), and hold swing_heading_deg while
+          # driving out. At full rate the real robot stopped at -169, 11
+          # past 180: the odom it stops on and the stop itself both cross
+          # Wi-Fi. 0 turns the easing off. Absolute mode only.
+          slow_within_deg: 20.0
 
           # Measured over the whole seven-phase move, not one phase: it is
           # timed from entering the stage. A real run came to
@@ -415,7 +482,11 @@
       # Turning it back on wants detect_lane to publish the pixel counts it
       # already computes, which is a publisher rather than a change of
       # algorithm - but that is a separate piece of work.
-      require_both_lines: false
+      require_both_lines: true
+      # ...for this long without a break before leaving the white line for
+      # the yellow one (2026-10-12). The sign is remembered once read, so the
+      # two need not happen at the same moment.
+      both_lines_s: 2.0
 
       # Reliability counts how much of the frame a line fills and moves by 5
       # a frame, so 50 is about ten frames of having seen it - a second or
@@ -488,6 +559,23 @@
       # round the pocket and back out the way it came the first time this
       # stage ran without an end.
       speed: 0.04
+
+      # Lane-following speed while turning off the road into the lot, until
+      # the corridor heading is held; control.max_vel comes back after.
+      # 2026-10-12: at the road's speed the robot ran wide of the 0.11 m
+      # yellow arc at 17B and carried on up the left lane. Slower turns
+      # tighter for the same steering error. 0 = leave the speed alone.
+      approach_max_vel: 0.05
+      # ...from this many degrees into the turn, not from the start of the
+      # stage - 2026-10-12, from the start it crawled all the way to 17B.
+      slow_from_deg: 10.0
+      # Steer by both yellow walls of the way in (detect_lane's yellow pair)
+      # until the corridor heading is held. The way out of the bay stays on
+      # the left yellow line alone.
+      yellow_pair: true
+      # Back to full speed once both yellow walls have held this many ticks
+      # in a row - lined up in the way in, the turn is done (2026-10-12).
+      pair_release_ticks: 3
 
       # Take the wheel as soon as the robot is running straight down the
       # corridor, rather than waiting for the yellow line to end.
@@ -826,8 +914,16 @@
       # lower kd rather than putting kp back.
       # Scaled with the speed: turning radius is v / (kp x error), so going
       # from 0.05 to 0.07 m/s without raising this widens every curve by the
-      # same 1.4x. 0.0087 = 0.006 x (0.07 / 0.05) holds the radius.
-      kp: 0.0087
+      # same 1.4x. 0.0087 = 0.006 x (0.07 / 0.05) held the radius in the
+      # simulator.
+      #
+      # 🔴 0.004 on the real robot, 2026-10-07 - the bottom of the ladder
+      # above. At 0.0087 the term reaches the 2.0 rad/s clamp at an error of
+      # 230 px, and a lane is only 595 px across, so 97 mm off centre asked
+      # for everything the clamp allows. The robot can sit 56 mm off centre
+      # and still be inside its lane. At 0.004 the clamp is 500 px away,
+      # which is further off than the lane is wide.
+      kp: 0.0040
 
       # A rate, not a raw frame-to-frame difference. /detect/lane arrives at
       # 1.9 Hz here - frames where the lane is lost publish nothing at all -
@@ -837,9 +933,22 @@
       # it outweighed P in 45 of 146 updates. Dividing by the measured dt
       # makes the gain mean the same thing at any frame rate.
       #
-      # 0.0037 = 0.007 x 0.53, so behaviour at today's rate is unchanged and
-      # stays put when lane.frame_skip changes.
-      kd: 0.0037
+      # 0.0037 = 0.007 x 0.53, so behaviour at the simulator's rate was
+      # unchanged.
+      #
+      # 🔴 "stays put when lane.frame_skip changes" is what used to be written
+      # here, and it is only half true. Dividing by dt makes the gain mean the
+      # same thing for a signal that is actually moving; it does nothing for
+      # noise, whose amplitude does not shrink with dt. Measurement jitter of
+      # a few pixels over a dt eleven times smaller is a derivative eleven
+      # times larger, and that is what the real camera delivered: 21 Hz where
+      # the gain was set at 1.9.
+      #
+      # 0.0015 on the real robot, 2026-10-07, with lane.frame_skip back to 3
+      # for about 7 Hz. Together those put the D term near where it was
+      # designed: (0.0015 / 0.0037) x (0.53 / 0.14) = 1.5x the original, not
+      # eleven.
+      kd: 0.003 #0.015
 
       # Most the published angular velocity may change between one lane
       # message and the next. The backstop for smoothness whatever the error
@@ -867,4 +976,4 @@
     # course is 16-18 m, which at 0.05 m/s is 320-360 s against a 300 s
     # limit, before any mission stops are counted.
     speed:
-      max: 0.07
+      max: 0.20

@@ -54,6 +54,7 @@ from cv_bridge import CvBridge
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float32
@@ -164,7 +165,15 @@ class DetectObstacle(Node):
         self.side = None
         self.front = None
 
-        self.create_subscription(LaserScan, '/scan', self.lidar_callback, 10)
+        # ARX: sensor-data QoS, best effort. The real robot's ld08_driver
+        # publishes /scan with SensorDataQoS, and a reliable subscription is
+        # incompatible with a best-effort publisher: DDS connects nothing and
+        # says nothing, so on the robot this node received no scan at all and
+        # the construction stage gave up after 60 s with "no report yet". The
+        # simulator's bridge publishes reliable, which a best-effort
+        # subscription also accepts, so this works on both.
+        self.create_subscription(LaserScan, '/scan', self.lidar_callback,
+                                 qos_profile_sensor_data)
         # ARX: the gate every detector in this package has. A scan costs far
         # less than a SIFT frame, but the rules allow props on the course
         # that belong to no mission, and a detector left looking will find

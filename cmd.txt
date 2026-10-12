@@ -1,0 +1,120 @@
+
+ros2 launch arx_camera_bringup camera.launch.py ae:=false exposure_us:=30000 gain:=9.0 awb:=false sharpness:=0.0
+
+
+ros2 launch turtlebot3_bringup robot.launch.py 
+
+
+
+
+
+ros2 launch turtlebot3_autorace_camera intrinsic_camera_calibration.launch.py
+
+ros2 launch turtlebot3_autorace_camera extrinsic_camera_calibration.launch.py calibration_mode:=True
+
+
+ros2 run rqt_reconfigure rqt_reconfigure
+
+
+
+
+
+
+
+
+
+
+
+ros2 run arx_mission detect_traffic_light --ros-args \
+  --params-file ~/turtlebot3_ws/install/arx_mission/share/arx_mission/param/light.yaml \
+  -p always_on:=true \
+  -p is_calibration_mode:=true \
+  -p use_sim_time:=false \
+  -r /detect/image_input:=/camera/image_compensated                 โชว์ จอ debug
+
+ros2 run rqt_reconfigure rqt_reconfigure  ส่งตั้งจริง
+
+python3 calibrate_ui/roi_probe.py /camera/image_compensated   ใช้ดูคร่าวๆ 
+
+
+
+
+
+
+
+ros2 launch arx_mission detect_lane.launch.py debug_image:=True
+
+ros2 launch arx_mission control_lane.launch.py
+
+ros2 topic pub --once /arx/drive_enable std_msgs/msg/Bool "{data: true}"
+
+
+
+
+
+
+
+
+ros2 launch arx_mission full.launch.py sim:=false
+
+
+
+
+
+
+
+
+
+วัดแสง
+
+
+ros2 launch arx_camera_bringup camera.launch.py ae:=false exposure_us:=20000 gain:=2.0 awb:=false sharpness:=0.0
+
+ros2 param get /camera ExposureTime       # 20000
+ros2 param get /camera AnalogueGain       # 2.8
+ros2 param get /camera ExposureTimeMode   # 0 = auto   1 = manual     
+ros2 param get /camera AnalogueGainMode   # 0 = auto   1 = manual 
+
+ros2 param get /camera AwbEnable     # true = auto, false = ล็อก
+ros2 param get /camera ColourGains   # [gain แดง, gain น้ำเงิน]
+
+
+
+
+ros2 param get /camera ExposureTime       # 30000
+ros2 param get /camera AnalogueGain       # 9.0
+ros2 param get /camera ExposureTimeMode   # 1
+ros2 param get /camera AnalogueGainMode   # 1
+ros2 param get /camera AwbEnable          # False
+ros2 param get /camera ColourGains        # [1.57, 1.51] ← ตัวที่ยังไม่แน่ใจ
+
+
+
+
+
+
+ros2 topic hz /camera/image_raw
+
+
+
+
+
+instrincs
+
+ros2 launch arx_camera_bringup camera.launch.py ae:=false exposure_us:=30000 gain:=9.0 awb:=false sharpness:=0.0
+
+ros2 run camera_calibration cameracalibrator \
+    --size 8x6 --square 0.0192 \
+    --ros-args -r image:=/camera/image_raw -p camera:=/camera
+
+
+
+
+extrinsic
+
+python3 calibrate_ui/roi_probe.py /camera/image_projected   วัดสีเลน
+
+
+
+
+ros2 topic echo /battery_state --once 

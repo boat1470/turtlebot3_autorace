@@ -23,7 +23,24 @@ echo` terminals and an rqt_image_view:
     history      the last 10 s of error. Gaps are frames with no centre:
                  detect_lane publishes nothing on /detect/lane then
     reliability  /detect/white_line_reliability and yellow, 0-100
+    heading      the robot's yaw off /odom, on a dial: 0 at the bottom is
+                 the way it faced when robot.launch.py came up, 180 at the
+                 top, + is left (counter-clockwise, so 90 is on the right) -
+                 the same angle mission_control uses, drawn the way round
+                 docs/curve_map.png is, where the robot sets off downwards.
+                 The dashed line is --target (default 180, the left script's
+                 heading), with how far is left to turn to it
     Hz           how often /detect/lane arrives
+    sign         the 'sign' image button shows detect_sign's debug image (the
+                 frame, with the reference sign and the matched points beside
+                 it on a hit); above lane state, which mission is armed and
+                 the last sign reported, with its age
+    obstacle     the 'obstacle' image button shows detect_obstacle's top-down
+                 LiDAR picture; under the sign line, which boxes ahead are
+                 blocked, what is beside the robot and the nearest thing in
+                 front - the robot's own left and right
+    batt         a small button: reads /battery_state once and shows voltage
+                 and percent as of that press. It does not update by itself
 
 Topic names are the ones detect_lane.launch.py remaps to. A value turns grey
 with "stale" when nothing has arrived for a second.
@@ -31,6 +48,7 @@ with "stale" when nothing has arrived for a second.
 
 import argparse
 import collections
+import math
 import threading
 import time
 
@@ -38,8 +56,11 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from sensor_msgs.msg import BatteryState
 from sensor_msgs.msg import CompressedImage
+from std_msgs.msg import Float32
 from std_msgs.msg import Float64
 from std_msgs.msg import UInt8
 
@@ -47,7 +68,21 @@ IMAGES = (
     ('lane', '/detect/image_lane/compressed'),
     ('white mask', '/detect/image_white_lane_marker/compressed'),
     ('yellow mask', '/detect/image_yellow_lane_marker/compressed'),
+    ('sign', '/detect/image_traffic_sign/compressed'),
+    ('obstacle', '/detect/image_obstacle/compressed'),
 )
+SIGN_IMAGE = IMAGES[3][1]
+OBSTACLE_IMAGE = IMAGES[4][1]
+
+# /detect/obstacle is a bitmask, /detect/obstacle_side a value - both the
+# robot's own left and right (detect_obstacle.py)
+BLOCKED_BITS = ((1, 'AHEAD'), (2, 'LEFT'), (4, 'RIGHT'))
+SIDES = {0: 'clear', 1: 'LEFT', 2: 'RIGHT'}
+
+# /detect/traffic_sign and /arx/armed_mission, as mission_control numbers them
+SIGNS = {1: 'CONSTRUCTION', 2: 'LEFT', 3: 'RIGHT', 4: 'PARKING'}
+MISSIONS = {0: 'none', 1: 'traffic light', 2: 'intersection', 3: 'construction',
+            4: 'parking', 5: 'level crossing', 6: 'tunnel'}
 
 # lane_state -> text, colour
 STATES = {
@@ -63,6 +98,7 @@ HISTORY = 10.0      # s of error kept for the plot
 VIEW = (500, 300)   # the image is scaled to fit this
 BAR_W, BAR_H = 420, 28
 PLOT_H = 110
+DIAL = 130          # px, the heading dial
 
 
 class Listener(Node):
@@ -80,11 +116,26 @@ class Listener(Node):
         for topic, kind in (('/detect/lane', Float64),
                             ('/detect/lane_state', UInt8),
                             ('/detect/white_line_reliability', UInt8),
-                            ('/detect/yellow_line_reliability', UInt8)):
+                            ('/detect/yellow_line_reliability', UInt8),
+                            ('/detect/traffic_sign', UInt8),
+                            ('/arx/armed_mission', UInt8),
+                            ('/detect/obstacle', UInt8),
+                            ('/detect/obstacle_side', UInt8),
+                            ('/detect/front_range', Float32)):
             self.create_subscription(
                 kind, topic, lambda msg, t=topic: self.on_value(t, msg.data), 10)
+        self.create_subscription(Odometry, '/odom', self.on_odom, 10)
+        self.create_subscription(
+            BatteryState, '/battery_state',
+            lambda m: self.on_value('/battery_state', (m.voltage, m.percentage)), 1)
         if with_image:
             self.watch(IMAGES[0][1])
+
+    def on_odom(self, msg):
+        q = msg.pose.pose.orientation
+        yaw = math.degrees(math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                                      1.0 - 2.0 * (q.y * q.y + q.z * q.z)))
+        self.on_value('/odom', yaw)
 
     def on_value(self, topic, value):
         now = time.monotonic()
@@ -125,13 +176,13 @@ class Listener(Node):
 
 class Window:
 
-    def __init__(self, node, with_image):
+    def __init__(self, node, with_image, target):
         import tkinter as tk
         from tkinter import ttk
         from PIL import Image as PilImage
         from PIL import ImageTk
         self.tk, self.pil, self.pil_tk = tk, PilImage, ImageTk
-        self.node, self.with_image = node, with_image
+        self.node, self.with_image, self.target = node, with_image, target
         self.photo, self.shown = None, 0.0
 
         root = self.root = tk.Tk()
@@ -163,7 +214,7 @@ class Window:
             self.which = tk.StringVar(value=IMAGES[0][1])
             for name, topic in IMAGES:
                 tk.Radiobutton(pick, text=name, value=topic, variable=self.which,
-                               command=self.switch, indicatoron=False, width=12,
+                               command=self.switch, indicatoron=False, width=10,
                                bg='#2a2a2a', fg=fg, selectcolor='#3a5a8a',
                                activebackground='#3a3a3a', activeforeground=fg
                                ).pack(side='left', padx=(0, 4))
@@ -174,6 +225,16 @@ class Window:
 
         right = ttk.Frame(root, style='Dark.TFrame', padding=8)
         right.grid(row=0, column=col, sticky='n')
+
+        # Which mission is armed, and the last sign detect_sign reported. It
+        # only reports a sign it matched, so this is the latest hit and how
+        # long ago - not what is in front of the camera now.
+        self.sign_text = label(right, text='-', font=mono, anchor='w', justify='left')
+        self.sign_text.pack(fill='x')
+        # detect_obstacle: what is in the boxes ahead, beside, and how far.
+        # It only reports while construction, parking or the tunnel is armed.
+        self.obst_text = label(right, text='-', font=mono, anchor='w', justify='left')
+        self.obst_text.pack(fill='x', pady=(0, 8))
 
         label(right, text='lane state', fg=dim, anchor='w').pack(fill='x')
         self.state = label(right, text='-', font=big, anchor='w')
@@ -220,9 +281,37 @@ class Window:
             text.pack(side='left', padx=(6, 0))
             self.rel[topic] = (c, fill, text)
 
+        label(right, text='heading  (/odom yaw, + is left)', fg=dim, anchor='w'
+              ).pack(fill='x', pady=(10, 0))
+        row = ttk.Frame(right, style='Dark.TFrame')
+        row.pack(fill='x')
+        d = self.dial = tk.Canvas(row, width=DIAL, height=DIAL, bg='#1b1b1b',
+                                  highlightthickness=0)
+        d.pack(side='left')
+        c, r = DIAL / 2, DIAL / 2 - 22
+        d.create_oval(c - r, c - r, c + r, c + r, outline='#555', width=2)
+        for deg, text in ((0, '0'), (90, '90'), (180, '180'), (-90, '-90')):
+            x, y = self.dial_xy(deg, r + 12)
+            d.create_text(x, y, text=text, fill=dim, font=('TkDefaultFont', 7))
+        tx, ty = self.dial_xy(target, r)
+        d.create_line(c, c, tx, ty, fill='#30b050', dash=(3, 3), width=2)
+        self.dial_arrow = d.create_line(c, c, c, c + r, fill=fg, width=4,
+                                        arrow='last', arrowshape=(12, 14, 5))
+        self.yaw_text = label(row, text='-', font=('TkFixedFont', 16, 'bold'),
+                              anchor='w', justify='left')
+        self.yaw_text.pack(side='left', padx=(12, 0))
+
+        foot = ttk.Frame(right, style='Dark.TFrame')
+        foot.pack(fill='x', pady=(10, 0))
         self.footer = tk.StringVar(value='')
-        label(right, textvariable=self.footer, font=mono, fg=dim, anchor='w',
-              justify='left').pack(fill='x', pady=(10, 0))
+        label(foot, textvariable=self.footer, font=mono, fg=dim, anchor='w',
+              justify='left').pack(side='left')
+        self.batt_text = label(foot, text='', font=mono, fg=dim, anchor='e')
+        tk.Button(foot, text='batt', command=self.show_battery, padx=4, pady=0,
+                  font=('TkDefaultFont', 8), bg='#2a2a2a', fg=fg,
+                  activebackground='#3a3a3a', activeforeground=fg
+                  ).pack(side='right')
+        self.batt_text.pack(side='right', padx=(0, 6))
 
         root.after(100, self.tick)
 
@@ -230,6 +319,33 @@ class Window:
         if rclpy.ok():
             self.node.watch(self.which.get())
             self.shown = 0.0
+
+    def show_battery(self):
+        """The latest /battery_state, once - it is not kept up to date."""
+        values = self.node.snapshot()[0]
+        v = values.get('/battery_state')
+        if v is None:
+            self.batt_text.config(text='no /battery_state - robot.launch up?', fg='#777')
+            return
+        (volts, pct), stamp = v
+        age = time.monotonic() - stamp
+        # BatteryState says 0-1; some drivers send 0-100. Take either.
+        pct = pct * 100 if pct <= 1.0 else pct
+        colour = '#e04040' if volts < 11.0 else '#e0b000' if volts < 11.4 else '#30b050'
+        self.batt_text.config(
+            text=f'{volts:.2f} V  {pct:.0f}%  at {time.strftime("%H:%M:%S")}'
+                 + (f'  ({age:.0f} s old)' if age > 5 else ''),
+            fg=colour)
+
+    @staticmethod
+    def dial_xy(deg, radius):
+        """0 points down, 180 up, + turns counter-clockwise, as yaw does.
+
+        Down for 0 because the robot sets off down the start lane on the map,
+        so the dial reads the same way round as docs/curve_map.png.
+        """
+        a = math.radians(deg)
+        return DIAL / 2 + radius * math.sin(a), DIAL / 2 + radius * math.cos(a)
 
     @staticmethod
     def err_colour(e):
@@ -292,7 +408,49 @@ class Window:
                 text.config(text=f'{r:3d}' + (' stale' if stale else ''),
                             fg='#777' if stale else warn)
 
+        # heading
+        yaw, stale = get('/odom')
+        if yaw is None:
+            self.yaw_text.config(text='no /odom', fg='#777')
+        else:
+            x, y = self.dial_xy(yaw, DIAL / 2 - 26)
+            self.dial.coords(self.dial_arrow, DIAL / 2, DIAL / 2, x, y)
+            self.dial.itemconfig(self.dial_arrow, fill='#777' if stale else '#e8e8e8')
+            to_go = (self.target - yaw + 180.0) % 360.0 - 180.0
+            near = abs(to_go) <= 3.0
+            self.yaw_text.config(
+                text=f'{yaw:+7.1f} deg\nto {self.target:.0f}: {to_go:+6.1f}'
+                     + ('\n(stale)' if stale else ''),
+                fg='#777' if stale else '#30b050' if near else '#e8e8e8')
+
         self.footer.set(f'/detect/lane  {hz:4.1f} Hz')
+
+        # mission and sign
+        m, m_stale = get('/arx/armed_mission')
+        armed = '?' if m is None else MISSIONS.get(m, str(m))
+        v = values.get('/detect/traffic_sign')
+        if v is None:
+            sign, colour = 'no sign yet', '#777'
+        else:
+            age = now - v[1]
+            sign = f'{SIGNS.get(v[0], str(v[0]))} ({v[0]})  {age:.1f} s ago'
+            colour = '#30b050' if age < 1.0 else '#e8e8e8' if age < 5.0 else '#777'
+        self.sign_text.config(text=f'armed: {armed}\nsign:  {sign}', fg=colour)
+
+        # obstacle
+        b, b_stale = get('/detect/obstacle')
+        sd, _ = get('/detect/obstacle_side')
+        fr, _ = get('/detect/front_range')
+        if b is None:
+            self.obst_text.config(text='obstacle: no report - armed? /scan up?', fg='#777')
+        else:
+            ahead = ' + '.join(n for bit, n in BLOCKED_BITS if b & bit) or 'clear'
+            side = '-' if sd is None else SIDES.get(sd, str(sd))
+            rng = '-' if fr is None else 'none' if fr >= 9.0 else f'{fr:.2f} m'
+            self.obst_text.config(
+                text=f'obstacle: {ahead}   side: {side}   front: {rng}'
+                     + ('  (stale)' if b_stale else ''),
+                fg='#777' if b_stale else '#e04040' if b else '#30b050')
 
         if self.with_image:
             if frame is not None and stamp != self.shown:
@@ -306,6 +464,12 @@ class Window:
                 self.canvas.itemconfig(
                     self.no_img, state='normal',
                     text='waiting for an image...' if self.which.get() == IMAGES[0][1]
+                    else 'no sign image - detect_sign only looks, and publishes\n'
+                         'this, while a mission with a sign is armed'
+                    if self.which.get() == SIGN_IMAGE
+                    else 'no LiDAR image - detect_obstacle only publishes while\n'
+                         'construction, parking or the tunnel is armed'
+                    if self.which.get() == OBSTACLE_IMAGE
                     else 'no mask - lane.publish_debug_image: true\n'
                          'in lane.yaml, then restart detect_lane')
 
@@ -351,6 +515,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--no-image', action='store_true',
                     help='numbers only, subscribe to no image')
+    ap.add_argument('--target', type=float, default=180.0,
+                    help='heading to mark on the dial, deg (default 180)')
     args = ap.parse_args()
 
     rclpy.init()
@@ -366,7 +532,7 @@ def main():
     spinner = threading.Thread(target=spin, daemon=True)
     spinner.start()
     try:
-        Window(node, with_image=not args.no_image).run()
+        Window(node, with_image=not args.no_image, target=args.target).run()
     except KeyboardInterrupt:
         pass
     finally:

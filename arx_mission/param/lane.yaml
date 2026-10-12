@@ -35,12 +35,17 @@
           hue_l: 0
           hue_h: 179
           saturation_l: 0
-          # Line up to 39, yellow from 92. Between, nearer white.
-          saturation_h: 60
-          # Mat up to 63, line from 111. auto_adjust_white moves this to keep
-          # the mask between 5000 and 35000 pixels; 100 gave 20418 on the
-          # test frame, inside the band, so it does not ramp from the start.
-          lightness_l: 100
+          # Line up to 39, yellow from 92. ARX 2026-10-11: was 60, which let
+          # in the window's reflection on the mat. Daylight is bluer than the
+          # room lamps ColourGains is locked to, so the glare comes out tinted:
+          # S 50-73 (median 56-64, H 117-138) at the two worst spots, against
+          # the line's 19-46 (median 23). 40 left 0 glare pixels at one spot
+          # and ~700 at the other, where the line kept 2667 of 2960. If glare
+          # still gets through, 35 - most of the line is below it.
+          saturation_h: 40
+          # Mat up to 63, glare 92-179, line from 111-121. Was 100; 125 drops
+          # most of the glare that saturation_h lets through.
+          lightness_l: 125
           lightness_h: 255
         yellow:
           # Line 23-34. 40 leaves room above; the mat's hues overlap this band,
@@ -64,10 +69,18 @@
       # measurement, and re-measuring one without the other leaves them
       # disagreeing.
       #
-      # 297 = half of 594.9 px, measured on the real course on 2026-10-04 with
-      # top_x 39 / top_y 25 / bottom_x 121 / bottom_y 118. It replaces a
-      # hardcoded 280, which was half of the simulator's lane and 17 px out
-      # here.
+      # 208 = half of 417 px, measured on a straight on 2026-10-11 with
+      # top_x 100 / top_y 13 / bottom_x 168 / bottom_y 105 - line centre to
+      # line centre at row 350, the row control_lane steers by. The lines
+      # came out parallel, 410 px at row 50 to 421 at row 590, so the row
+      # hardly matters. A 0.28 m lane, so about 1.49 px/mm.
+      #
+      # It was 297 (594.9 px, 2026-10-04, top_x 39 / top_y 25 / bottom_x 121
+      # / bottom_y 118), left over when projection.yaml changed: 89 px too
+      # wide, so with only the white line in view the centre sat 89 px
+      # inside the lane - and in the first, left-hand curve, where the
+      # yellow line is inside and drops out of frame, the robot cut across
+      # it. Before that it replaced a hardcoded 280, the simulator's lane.
       #
       # 17 px is 7 mm, which sounds small and is not: the two-line branch does
       # not use this number at all, it averages the two lines. So the centre
@@ -75,7 +88,34 @@
       # like that is a derivative of 174 px/s at 10 Hz - the D term kicked the
       # steering by 0.26 rad/s for a robot that had not moved. No pair of
       # gains smooths that away, which is why this comes before kp and kd.
-      half_lane_px: 297
+      half_lane_px: 208
+
+      # The row of the 600-row projected image whose centre goes to
+      # control_lane - how far ahead the robot aims. 350 is the original's
+      # literal. Drawn on /detect/image_lane as a grey line with a white dot.
+      #
+      # Far ahead (smaller) cuts the inside of every curve, because the
+      # target is already round the bend while the robot is not; worst in an
+      # S with no straight between, like the left branch's exit at
+      # (1000, 1500) mm into C3. Nearer (bigger) follows the line closer but
+      # reacts later, and the same heading error gives a smaller pixel error
+      # there, so kp may need to come up with it. Settable live.
+      #
+      # 480 on 2026-10-11: 4B, which 350 cut into the yellow line, looks
+      # right at 480.
+      # Not yet checked on the U-turns (19A, 13A) or on the straights.
+      lookahead_row: 580
+
+      # Drop white pixels left of the yellow line (plus this margin) before
+      # fitting the white one: a lane's white line is always right of its
+      # yellow line. 2026-10-12 - between 8A and 10B the parking lot's white
+      # wall runs 12 cm past the yellow line, and the white fit caught it in
+      # the 8A turn and followed it down the straight. Only on rows the
+      # yellow mask has pixels on, and not in the parking lot's yellow-pair
+      # mode. 40 px is about 27 mm at 1.49 px/mm.
+      white_gate: true
+      white_gate_margin_px: 40
+      # 480 เดินดีอยู่นะ
       # Left at the original's 2-in-3 drop. /camera/image_projected runs at
       # 8.78 Hz measured, so this is what puts /detect/lane at ~2.9 Hz, and
       # control_lane's D term therefore sees a real dt of 0.34 s - about
@@ -112,12 +152,16 @@
       # meant changing the behaviour being looked at.
       publish_debug_image: true
 
-      # The original's asymmetry, preserved rather than fixed: white adjusts
-      # its lightness floor when NOT calibrating, yellow adjusts when it IS.
-      # Almost certainly a typo upstream, but changing it changes a tuning
-      # the robot is currently driving on, so it stays until there is a run
-      # to compare against.
-      auto_adjust_white: true
+      # The original's asymmetry: white adjusted its lightness floor when NOT
+      # calibrating, yellow when it IS - almost certainly a typo upstream.
+      #
+      # ARX 2026-10-11: white off as well. It counts mask pixels, and glare
+      # moves the count both wrong ways: a big reflection pushes it over
+      # 35000, so lightness_l ramps up (it was seen at 185) and the dimmer
+      # half of the real line goes; a view with no white line in it falls
+      # under 5000, so lightness_l ramps down by 5 a frame until the
+      # reflection comes back in. Fixed bands above do better on this mat.
+      auto_adjust_white: false
       auto_adjust_yellow: false
 
       # Logged every processed frame in the original, at rosout severity

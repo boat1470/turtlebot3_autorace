@@ -47,7 +47,7 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, Float32, UInt8
+from std_msgs.msg import Bool, Float32, Float64, UInt8
 
 # /arx/traffic_light - must match detect_traffic_light.py
 LIGHT_UNKNOWN = 0
@@ -81,6 +81,9 @@ SIGN_NAMES = {SIGN_CONSTRUCTION: 'construction',
 FOLLOW_AUTO = 0
 FOLLOW_YELLOW = 1
 FOLLOW_WHITE = 2
+# ARX: detect_lane's yellow pair - both walls yellow, as on the way into the
+# parking lot. Must match detect_lane.py.
+FOLLOW_YELLOW_PAIR = 3
 
 SIDE_FOR_SIGN = {SIGN_LEFT: FOLLOW_YELLOW, SIGN_RIGHT: FOLLOW_WHITE}
 SIDE_NAMES = {FOLLOW_AUTO: 'auto', FOLLOW_YELLOW: 'yellow', FOLLOW_WHITE: 'white'}
@@ -99,6 +102,7 @@ MISSION_TUNNEL = 6
 STAGE_WAIT_GREEN = 'wait_green'
 STAGE_DRIVE_TO_SIGN = 'drive_to_sign'
 STAGE_TURN = 'turn'
+STAGE_LEFT_SCRIPT = 'left_script'
 STAGE_FOLLOW_SIDE = 'follow_side'
 STAGE_DRIVE_TO_CONSTRUCTION = 'drive_to_construction'
 STAGE_AVOID_CONSTRUCTION = 'avoid_construction'
@@ -279,6 +283,39 @@ class MissionControl(Node):
         # give it.
         self.declare_parameter('intersection.follow_chosen_line', False)
 
+        # A left arrow is driven by a fixed script instead of the turn below
+        # (ARX): on the real course the yellow line of the left branch is not
+        # in frame where the arrow is confirmed, so there is nothing to hand
+        # over to. Face an absolute heading, forward, turn left, forward,
+        # and only then steer by the yellow line. A right arrow is unchanged.
+        #
+        # The heading is a world angle - see spawn_yaw_deg - so it is right
+        # only if the robot was brought up facing along the start line.
+        self.declare_parameter('intersection.left_script.enabled', False)
+        self.declare_parameter('intersection.left_script.heading_deg', 180.0)
+        self.declare_parameter('intersection.left_script.heading_tolerance_deg', 3.0)
+        self.declare_parameter('intersection.left_script.first_m', 0.30)
+        # Relative, + is left.
+        self.declare_parameter('intersection.left_script.turn_deg', 90.0)
+        self.declare_parameter('intersection.left_script.second_m', 0.30)
+        self.declare_parameter('intersection.left_script.rate', 0.4)       # rad/s
+        self.declare_parameter('intersection.left_script.speed', 0.05)     # m/s
+        self.declare_parameter('intersection.left_script.slow_within_deg', 10.0)
+        # Per step. Catches odometry that never arrives or a wheel that is
+        # held; the script then moves on to the next step rather than stall.
+        self.declare_parameter('intersection.left_script.step_give_up_s', 15.0)
+        # Stop where the script ends instead of handing over to the yellow
+        # line. A bench aid, like stop_after_detect: it fails the run.
+        self.declare_parameter('intersection.left_script.stop_after', False)
+        # What to steer by once the script is done: true pins detect_lane to
+        # the yellow line until the construction sign, whatever
+        # follow_chosen_line says; false hands back the mean of both lines.
+        self.declare_parameter('intersection.left_script.follow_yellow_after', True)
+        # The same choice for a right arrow, after its turn: true pins the
+        # white line (when follow_chosen_line is on), false is the mean of
+        # both lines.
+        self.declare_parameter('intersection.right_follow_white_after', True)
+
         self.declare_parameter('intersection.turn.left_deg', 30.0)
         self.declare_parameter('intersection.turn.right_deg', -5.0)
         # Ease in over the last stretch so a tick of rotation cannot overshoot
@@ -421,6 +458,24 @@ class MissionControl(Node):
         self.declare_parameter('construction.avoid.edge.in_place_first_only', True)
         self.declare_parameter('construction.avoid.edge.speed', 0.04)
         self.declare_parameter('construction.avoid.edge.swing_deg', 90.0)
+        # ARX: swing to fixed odom headings instead of swing_deg relative to
+        # wherever the robot pointed when it began. Relative carries any skew
+        # lane following left at that moment into every heading after it;
+        # absolute does not. Off by default, so the simulator's tuning is
+        # unchanged. corridor_heading_deg is the way the zone runs, and
+        # swing_heading_deg the way to point while getting round the first
+        # board - which also decides the side, overriding the hugged line.
+        # The second swing of a double swerve mirrors it about the corridor.
+        self.declare_parameter('construction.avoid.edge.absolute', False)
+        self.declare_parameter('construction.avoid.edge.corridor_heading_deg', 90.0)
+        self.declare_parameter('construction.avoid.edge.swing_heading_deg', 180.0)
+        # ARX: absolute only. Ease the on-the-spot turn over its last
+        # stretch, down to a quarter of in_place_rate, and steer back onto
+        # swing_heading_deg while driving out. At full rate into the target
+        # the real robot carried on 11 degrees past it after the stop - the
+        # odom it stops on and the stop it is sent both cross Wi-Fi - and
+        # then drove `out` diagonally, towards the board ahead.
+        self.declare_parameter('construction.avoid.edge.slow_within_deg', 20.0)
         # There is no tolerance parameter for the end of a swing back. It
         # finishes when the heading crosses the one it started from, which
         # is a sign change and cannot be stepped over.
@@ -464,6 +519,11 @@ class MissionControl(Node):
         # Reliability counts how much of the frame a line fills and moves by
         # 5 a frame, so 50 is about ten frames of having seen it.
         self.declare_parameter('parking.min_reliability', 50)
+        # ARX: ...and for this long without a break, before leaving the white
+        # line for the yellow one. The sign is remembered once confirmed, so
+        # it does not have to be in view at the same moment - its votes
+        # expire after vote_max_age_s, and the lines may come right later.
+        self.declare_parameter('parking.both_lines_s', 2.0)
 
         # The parking lot itself (ARX). Measured off the course texture, which
         # is an exact map of the track - see notes/track_geometry.py:
@@ -490,6 +550,30 @@ class MissionControl(Node):
         # Driven by this node rather than by lane following, so it needs its
         # own speed. The same creep the construction swings use.
         self.declare_parameter('lot.speed', 0.04)
+        # ARX: lane-following speed ceiling while turning off the road into
+        # the lot, published on /control/max_vel until the corridor heading is
+        # held. The turn follows a yellow arc of 0.11 m radius, and at the
+        # road's speed the robot ran wide of it - control_lane turns at
+        # kp x error whatever the speed, so a slower robot turns tighter for
+        # the same error. 0 leaves the speed alone. control.max_vel is what is
+        # put back afterwards, read from the same mission.yaml.
+        self.declare_parameter('lot.approach_max_vel', 0.0)
+        # ...but only once the turn has begun: this many degrees of it. From
+        # the start of the stage, the robot crawled the whole road to 17B.
+        self.declare_parameter('lot.slow_from_deg', 10.0)
+        # Steer by both yellow walls on the way in (detect_lane's yellow
+        # pair) rather than the left one plus half a lane. Only until the
+        # corridor heading is held, as before; the way out stays on yellow.
+        self.declare_parameter('lot.yellow_pair', False)
+        # ...and once both yellow walls have been seen for this many ticks in
+        # a row (lane_state 2 in the yellow pair mode, which reaches 2 no
+        # other way), the slow-down ends: the robot is in the way in, lined up
+        # between them, and the turn it was slowed for is done.
+        self.declare_parameter('lot.pair_release_ticks', 3)
+        self.declare_parameter('control.max_vel', 0.15)
+        self.max_vel_want = None       # this tick's override, set by a stage
+        self.max_vel_sent = None
+        self.max_vel_tick = 0
         # Take the wheel as soon as the robot is running straight down the
         # corridor, rather than waiting for the yellow line to end.
         #
@@ -800,6 +884,13 @@ class MissionControl(Node):
         # picked is long behind, and there is nothing left to hug a single
         # line for. Not on entering the stage - on reading the sign.
         self.construction_seen = False
+        # The left script (ARX): which step it is on, when that step began,
+        # where the robot stood when a straight began, and whether it ran.
+        self.left_step = 0
+        self.left_step_since = None
+        self.left_mark = None
+        self.left_hold = None
+        self.left_done = False
         # Latest report from detect_obstacle. None until one arrives, which
         # is not the same as a clear corridor and is treated differently.
         self.blocked = None
@@ -828,6 +919,14 @@ class MissionControl(Node):
         # in this stage yet, and where the robot was standing when it ran
         # out - which is the gap that is the pocket's mouth.
         self.lot_gone_ticks = 0
+        # ARX: the parking sign, once confirmed, and since when both lines
+        # have been in view without a break.
+        self.parking_sign_at = None
+        self.both_since = None
+        # ARX: ticks in a row with both yellow walls, and whether that has
+        # released the slow-down for the rest of the way in.
+        self.lot_pair_ticks = 0
+        self.lot_pair_seen = False
         self.lot_mark = None
         # The heading the corridor is being run on, once the robot has
         # settled onto one, and the window it is judged from.
@@ -873,6 +972,7 @@ class MissionControl(Node):
         # hold_tick fights this at 10 Hz.
         self.pub_avoid = self.create_publisher(Bool, '/avoid_active', 1)
         self.pub_avoid_cmd = self.create_publisher(Twist, '/avoid_control', 1)
+        self.pub_max_vel = self.create_publisher(Float64, '/control/max_vel', 1)
         self.create_subscription(UInt8, '/detect/lane_state', self.on_lane_state, 1)
         self.create_subscription(UInt8, '/arx/traffic_light', self.on_light, 1)
         self.create_subscription(UInt8, '/detect/traffic_sign', self.on_sign, 1)
@@ -1120,6 +1220,30 @@ class MissionControl(Node):
         now = self.now()
         if self.stage_since is None:
             self.stage_since = now
+        self.max_vel_want = None
+        self.tick_stage(now)
+        self.send_max_vel()
+
+    def send_max_vel(self):
+        """Publish the speed ceiling a stage asked for, or the normal one (ARX).
+
+        Only once something has asked: until then control_lane keeps its own
+        control.max_vel and nothing here touches it. After that it is sent on
+        every change and once a second besides, because control_lane's
+        subscription is depth 1 and volatile and a single message can be
+        missed.
+        """
+        want = self.max_vel_want
+        if want is None:
+            if self.max_vel_sent is None:
+                return
+            want = self.get_parameter('control.max_vel').value
+        self.max_vel_tick += 1
+        if want != self.max_vel_sent or self.max_vel_tick >= 10:
+            self.pub_max_vel.publish(Float64(data=float(want)))
+            self.max_vel_sent, self.max_vel_tick = want, 0
+
+    def tick_stage(self, now):
 
         if self.stage == STAGE_WAIT_GREEN:
             self.tick_wait_green(now)
@@ -1127,6 +1251,8 @@ class MissionControl(Node):
             self.tick_drive_to_sign(now)
         elif self.stage == STAGE_TURN:
             self.tick_turn(now)
+        elif self.stage == STAGE_LEFT_SCRIPT:
+            self.tick_left_script(now)
         elif self.stage == STAGE_FOLLOW_SIDE:
             self.tick_follow_side()
         elif self.stage == STAGE_DRIVE_TO_CONSTRUCTION:
@@ -1157,7 +1283,7 @@ class MissionControl(Node):
     def tick_wait_green(self, now):
         self.set_armed(MISSION_TRAFFIC_LIGHT)
         self.set_driving(False)
-        self.set_follow_side(FOLLOW_AUTO)
+        self.set_follow_side(FOLLOW_AUTO) #v;ldk
         self.set_avoid(False)
         if not self.get_parameter('light.enabled').value:
             self.start('traffic light check disabled')
@@ -1193,7 +1319,7 @@ class MissionControl(Node):
         # for one of them in the middle of the course would be worse than
         # anything the light itself can cost.
         self.set_driving(True)
-        self.set_follow_side(FOLLOW_AUTO)
+        self.set_follow_side(FOLLOW_AUTO) #kljvsldak
         self.set_avoid(False)
 
         if not self.get_parameter('intersection.enabled').value:
@@ -1213,6 +1339,10 @@ class MissionControl(Node):
                 f'ignored on heading)')
             if self.get_parameter('intersection.stop_after_detect').value:
                 self.stop(f'sign {name} - stopping here, as asked')
+            elif (SIDE_FOR_SIGN.get(winner) == FOLLOW_YELLOW and
+                    self.get_parameter('intersection.left_script.enabled').value):
+                self.start_left_step(0, now)
+                self.go(STAGE_LEFT_SCRIPT, f'sign {name} - driving the left script')
             elif self.get_parameter('intersection.turn.enabled').value:
                 self.turn_start_yaw = self.yaw
                 self.turn_last_yaw = self.yaw
@@ -1332,13 +1462,132 @@ class MissionControl(Node):
         self.after_junction(f'{why} after turning {turned:+.0f} deg'
                             if turned is not None else why)
 
+    # --- the left script (ARX) ----------------------------------------
+    #
+    #   0  turn on the spot to face left_script.heading_deg
+    #   1  forward first_m, holding the heading it set off on
+    #   2  turn turn_deg on the spot, relative
+    #   3  forward second_m, holding the heading it set off on
+    #
+    # then steer by the yellow line.
+
+    def start_left_step(self, step, now):
+        self.left_step = step
+        self.left_step_since = now
+        self.left_mark = self.pos
+        # The heading a straight holds; the turn measures from here too.
+        self.left_hold = self.yaw
+        self.turn_start_yaw = self.yaw
+        self.turn_last_yaw = self.yaw
+        self.turn_accum = 0.0
+
+    def left_rate(self, remaining_deg):
+        """Turn rate towards a remaining angle, eased over the last stretch."""
+        p = 'intersection.left_script.'
+        rate = self.get_parameter(p + 'rate').value
+        slow = self.get_parameter(p + 'slow_within_deg').value
+        if slow > 0 and abs(remaining_deg) < slow:
+            rate *= max(abs(remaining_deg) / slow, 0.25)
+        return rate if remaining_deg >= 0 else -rate
+
+    def left_straight(self, metres):
+        """Drive forward, steering back onto the heading the step began on.
+
+        Returns True once `metres` have been covered.
+        """
+        gone = self.dist_from(self.left_mark)
+        if gone is not None and gone >= metres:
+            return True
+        angular = 0.0
+        if self.left_hold is not None and self.yaw is not None:
+            err = (self.left_hold - self.yaw + 180.0) % 360.0 - 180.0
+            limit = self.get_parameter('intersection.left_script.rate').value
+            angular = max(-limit, min(limit, math.radians(err)))
+        self.set_avoid(True, angular=angular,
+                       linear=self.get_parameter('intersection.left_script.speed').value)
+        return False
+
+    def tick_left_script(self, now):
+        p = 'intersection.left_script.'
+        self.set_armed(MISSION_NONE)
+        # detect_lane fits yellow throughout, so the hand-over is not cold.
+        self.set_follow_side(FOLLOW_YELLOW)
+        # True throughout, as in tick_turn: hold_tick would zero the wheels.
+        self.set_driving(True)
+
+        if self.yaw is None or self.pos is None:
+            self.get_logger().warn(
+                'no odometry, so the left script cannot be measured - '
+                'going straight to the yellow line', once=True)
+            self.finish_left_script('no odometry')
+            return
+
+        step = self.left_step
+        done = False
+        if step == 0:
+            want = self.get_parameter(p + 'heading_deg').value
+            err = (want - self.yaw + 180.0) % 360.0 - 180.0
+            if abs(err) <= self.get_parameter(p + 'heading_tolerance_deg').value:
+                done = True
+            else:
+                self.set_avoid(True, angular=self.left_rate(err), linear=0.0)
+        elif step == 1:
+            done = self.left_straight(self.get_parameter(p + 'first_m').value)
+        elif step == 2:
+            self.accumulate_turn()
+            target = self.get_parameter(p + 'turn_deg').value
+            remaining = target - self.turn_accum
+            if (target >= 0 and remaining <= 0) or (target < 0 and remaining >= 0):
+                done = True
+            else:
+                self.set_avoid(True, angular=self.left_rate(remaining), linear=0.0)
+        elif step == 3:
+            done = self.left_straight(self.get_parameter(p + 'second_m').value)
+        else:
+            self.finish_left_script('left script done')
+            return
+
+        waited = now - self.left_step_since
+        if not done and waited > self.get_parameter(p + 'step_give_up_s').value:
+            self.get_logger().warn(
+                f'left script step {step} timed out after {waited:.0f} s - '
+                f'moving on')
+            done = True
+        if done:
+            # A zero between steps, so a turn does not bleed into a straight.
+            self.set_avoid(True, angular=0.0, linear=0.0)
+            self.get_logger().info(
+                f'left script step {step} done, facing {self.yaw:+.1f} deg')
+            self.start_left_step(step + 1, now)
+
+    def finish_left_script(self, why):
+        self.set_avoid(True, angular=0.0, linear=0.0)
+        self.set_avoid(False)
+        self.left_done = True
+        if self.get_parameter('intersection.left_script.stop_after').value:
+            self.stop(f'{why} - stopping here, as asked')
+            return
+        line = ('the yellow line' if self.get_parameter(
+            'intersection.left_script.follow_yellow_after').value
+            else 'both lines')
+        self.after_junction(f'{why} - steering by {line} from here')
+
     def chosen_side(self):
         """The line to steer by, or auto when the arrow only picked a turn."""
         if self.construction_seen:
             return FOLLOW_AUTO
+        # The left script decides for itself, whatever follow_chosen_line says.
+        if self.left_done:
+            if self.get_parameter('intersection.left_script.follow_yellow_after').value:
+                return FOLLOW_YELLOW
+            return FOLLOW_AUTO
         if not self.get_parameter('intersection.follow_chosen_line').value:
             return FOLLOW_AUTO
-        return SIDE_FOR_SIGN.get(self.decision, FOLLOW_AUTO)
+        side = SIDE_FOR_SIGN.get(self.decision, FOLLOW_AUTO)
+        if (side == FOLLOW_WHITE and
+                not self.get_parameter('intersection.right_follow_white_after').value):
+            return FOLLOW_AUTO
+        return side
 
     def after_junction(self, why):
         """Where the wheel goes once the junction is behind us."""
@@ -1458,6 +1707,11 @@ class MissionControl(Node):
         # the corridor is paint, so the right window past the white line
         # reads clear - open ground, as far as a laser is concerned.
         self.edge_dir = +1 if self.hug_side == FOLLOW_WHITE else -1
+        if self.get_parameter('construction.avoid.edge.absolute').value:
+            off = self.heading_off(
+                self.get_parameter('construction.avoid.edge.swing_heading_deg').value,
+                self.get_parameter('construction.avoid.edge.corridor_heading_deg').value)
+            self.edge_dir = +1 if off > 0 else -1
         # The heading to come back to. Taken now, while lane following still
         # has the robot square to the corridor.
         self.corridor_yaw = self.yaw
@@ -1516,6 +1770,7 @@ class MissionControl(Node):
         across = g('construction.avoid.edge.cross_m').value
         out = g('construction.avoid.edge.out_m').value
         spot_rate = g('construction.avoid.edge.in_place_rate').value
+        absolute = g('construction.avoid.edge.absolute').value and self.yaw is not None
 
         radius = first_r if self.edge_phase < 3 else second_r
         rate = speed / radius if radius > 0.0 else 0.0
@@ -1526,10 +1781,16 @@ class MissionControl(Node):
 
         if self.edge_phase == 0:
             if self.edge_on_spot():
-                self.set_avoid(True, angular=self.edge_dir * spot_rate, linear=0.0)
+                w = spot_rate
+                slow = g('construction.avoid.edge.slow_within_deg').value
+                if absolute and slow > 0:
+                    left = abs(self.heading_off(self.edge_headings()[0], self.yaw))
+                    w *= min(1.0, max(left / slow, 0.25))
+                self.set_avoid(True, angular=self.edge_dir * w, linear=0.0)
             else:
                 self.set_avoid(True, angular=self.edge_dir * rate, linear=speed)
-            if abs(turned) >= swing:
+            if (self.edge_reached(self.edge_headings()[0], self.edge_dir) if absolute
+                    else abs(turned) >= swing):
                 self.edge_phase = 1
                 self.edge_mark = self.pos
                 self.get_logger().info(
@@ -1545,7 +1806,13 @@ class MissionControl(Node):
             if not self.edge_on_spot():
                 self.edge_phase = 2
                 return
-            self.set_avoid(True, angular=0.0, linear=speed)
+            w = 0.0
+            if absolute:
+                # Hold swing_heading_deg, so an overshoot in the turn is not
+                # driven out as a diagonal.
+                err = math.radians(self.heading_off(self.edge_headings()[0], self.yaw))
+                w = max(-spot_rate, min(spot_rate, 1.5 * err))
+            self.set_avoid(True, angular=w, linear=speed)
             gone = self.edge_gone()
             if gone is None or gone >= out:
                 self.edge_phase = 2
@@ -1555,7 +1822,9 @@ class MissionControl(Node):
 
         if self.edge_phase == 2:
             self.set_avoid(True, angular=-self.edge_dir * rate, linear=speed)
-            if not self.edge_crossed(turned, 0.0, self.edge_dir):
+            back = (self.edge_reached(self.edge_headings()[1], -self.edge_dir) if absolute
+                    else self.edge_crossed(turned, 0.0, self.edge_dir))
+            if not back:
                 return
             if not double:
                 self.finish_edge('round the board')
@@ -1580,7 +1849,8 @@ class MissionControl(Node):
 
         if self.edge_phase == 4:
             self.set_avoid(True, angular=way * rate, linear=speed)
-            if abs(turned - base) >= swing:
+            if (self.edge_reached(self.edge_headings()[2], way) if absolute
+                    else abs(turned - base) >= swing):
                 self.edge_phase = 5
                 self.edge_mark = self.pos
                 self.get_logger().info(
@@ -1598,7 +1868,8 @@ class MissionControl(Node):
             return
 
         self.set_avoid(True, angular=-way * rate, linear=speed)
-        if self.edge_crossed(turned, base, way):
+        if (self.edge_reached(self.edge_headings()[1], -way) if absolute
+                else self.edge_crossed(turned, base, way)):
             self.finish_edge('round both boards')
             return
 
@@ -1609,6 +1880,27 @@ class MissionControl(Node):
                 f'(phase {self.edge_phase}, turned {turned:+.0f} deg) - '
                 f'handing back to the lane')
             self.finish_edge('gave up getting round')
+
+    @staticmethod
+    def heading_off(target, yaw):
+        """Degrees from yaw to target, wrapped to -180..180; + is left."""
+        return (target - yaw + 180.0) % 360.0 - 180.0
+
+    def edge_headings(self):
+        """(out, back, other-way out) for the absolute swings (ARX)."""
+        g = self.get_parameter
+        corridor = g('construction.avoid.edge.corridor_heading_deg').value
+        out = g('construction.avoid.edge.swing_heading_deg').value
+        mirror = corridor - self.heading_off(out, corridor)
+        return out, corridor, mirror
+
+    def edge_reached(self, target, way):
+        """Whether turning `way` has brought yaw to or past target (ARX).
+
+        The same sign-change test as edge_crossed, so a coarse tick cannot
+        step over it, but against a fixed odom heading.
+        """
+        return self.yaw is not None and self.heading_off(target, self.yaw) * way <= 0.0
 
     def edge_crossed(self, turned, base, way):
         """Whether a swing has come back past the heading it left (ARX).
@@ -1682,15 +1974,30 @@ class MissionControl(Node):
         self.set_follow_side(self.hug_side)
         self.set_armed(MISSION_PARKING)
 
-        winner, votes = self.sign_majority({SIGN_PARKING})
-        both = self.both_lines()
+        # ARX: the sign is latched, then both lines have to hold for
+        # parking.both_lines_s before the steering goes over to yellow - the
+        # moment the road is back to one ordinary lane with both lines in it.
+        if self.parking_sign_at is None:
+            winner, votes = self.sign_majority({SIGN_PARKING})
+            if winner is not None:
+                self.parking_sign_at = now
+                self.get_logger().info(
+                    f'parking sign confirmed: {votes} of the last '
+                    f'{len(self.fresh_votes())} reports '
+                    f'({self.sign_msgs} seen, {self.sign_rejected} ignored on '
+                    f'heading) - waiting for both lines')
+        if self.both_lines():
+            if self.both_since is None:
+                self.both_since = now
+        else:
+            self.both_since = None
+        held = 0.0 if self.both_since is None else now - self.both_since
         need_both = self.get_parameter('parking.require_both_lines').value
-        if winner is not None and (both or not need_both):
+        need_s = self.get_parameter('parking.both_lines_s').value
+        if self.parking_sign_at is not None and (not need_both or held >= need_s):
             self.get_logger().info(
-                f'parking sign confirmed: {votes} of the last '
-                f'{len(self.fresh_votes())} reports '
-                f'({self.sign_msgs} seen, {self.sign_rejected} ignored on '
-                f'heading, lines yellow {self.yellow_ok} white {self.white_ok})')
+                f'both lines for {held:.1f} s (yellow {self.yellow_ok}, white '
+                f'{self.white_ok}) - over to the yellow line')
             if self.get_parameter('parking.stop_after_detect').value:
                 self.stop('parking sign - stopping here, as asked')
             elif self.get_parameter('lot.enabled').value:
@@ -1707,6 +2014,13 @@ class MissionControl(Node):
             # no reports at all, reports that never formed a majority, or a
             # majority that was never allowed because the lines were not
             # both in view.
+            if self.parking_sign_at is not None:
+                why = (f'sign read {now - self.parking_sign_at:.0f} s ago but both '
+                       f'lines never held {need_s:.1f} s (yellow {self.yellow_ok}, '
+                       f'white {self.white_ok})')
+                self.get_logger().warn(f'parking: {why} - carrying on')
+                self.go(STAGE_FOLLOW_SIDE, 'gave up waiting for both lines')
+                return
             self.get_logger().warn(
                 f'no parking sign after {waited:.0f} s '
                 f'({self.sign_msgs} reports, {self.sign_rejected} dropped on '
@@ -1790,7 +2104,20 @@ class MissionControl(Node):
             # Lane following, steering by the yellow line, all the way round
             # the turn and into the corridor.
             self.set_avoid(False)
-            self.set_follow_side(FOLLOW_YELLOW)
+            self.set_follow_side(
+                FOLLOW_YELLOW_PAIR if self.get_parameter('lot.yellow_pair').value
+                else FOLLOW_YELLOW)
+            pairing = self.get_parameter('lot.yellow_pair').value
+            if pairing and not self.lot_pair_seen:
+                self.lot_pair_ticks = self.lot_pair_ticks + 1 if self.lane_state == 2 else 0
+                if self.lot_pair_ticks >= self.get_parameter('lot.pair_release_ticks').value:
+                    self.lot_pair_seen = True
+                    self.get_logger().info(
+                        'both yellow walls in view - back to full speed')
+            slow = self.get_parameter('lot.approach_max_vel').value
+            if (slow > 0 and not self.lot_pair_seen and abs(self.lot_turn)
+                    >= self.get_parameter('lot.slow_from_deg').value):
+                self.max_vel_want = slow
             if self.lot_watch_heading():
                 self.get_logger().info(
                     f'straight down the corridor on {self.hold_heading_deg:+.1f} deg '
@@ -1804,10 +2131,43 @@ class MissionControl(Node):
         # Watched the whole time, whoever is steering: detect_lane keeps
         # working out lane_state regardless of who has the wheel.
         if self.lot_mark is None:
-            if self.lane_state == 0:
+            # ARX: 3 counts as well as 0, once the corridor heading is held.
+            # Steering by yellow (or the yellow pair), a frame with no yellow
+            # falls through to detect_lane's ordinary logic - and in the lot
+            # the white wall and dashes are in view, so it reports 3, white
+            # only, not 0, and the end of the yellow line was never seen. 3
+            # only after the hold: in the turn at 17B the inner yellow can
+            # drop out for a moment with the road's white line in view.
+            # With the yellow pair on, detect_lane reports 0 for any frame
+            # without yellow - including a moment's loss of it in the turn -
+            # so in that mode nothing counts until the corridor is held.
+            held = self.hold_heading_deg is not None
+            if self.get_parameter('lot.yellow_pair').value:
+                # White (3) once both yellow walls have been seen means the
+                # walls have ended and the lot's white has begun - no need to
+                # wait for the heading hold. Before the pair, white is just
+                # the road's edge in the turn.
+                ran_out = ((self.lot_pair_seen and self.lane_state == 3) or
+                           (held and self.lane_state in (0, 3)))
+            else:
+                ran_out = self.lane_state == 0 or (held and self.lane_state == 3)
+            if ran_out:
                 self.lot_gone_ticks += 1
                 if self.lot_gone_ticks >= self.get_parameter('lot.confirm_ticks').value:
                     self.lot_mark = self.pos
+                    # ARX: take the wheel here if the corridor never settled
+                    # enough to hold. Lane following has no centre to give
+                    # once the yellow walls end - the yellow pair reports the
+                    # lot's white without steering by it - so control_lane
+                    # would keep its last command: on 2026-10-12 that turned
+                    # the robot from -84 to -47 deg over the 0.30 m lead, and
+                    # parking from there went wrong all the way out. The
+                    # heading now is the one the yellow walls lined it up on.
+                    if self.hold_heading_deg is None and self.yaw is not None:
+                        self.hold_heading_deg = self.yaw
+                        self.get_logger().info(
+                            f'corridor never held - holding {self.yaw:+.1f} deg '
+                            f'through the lead')
                     where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
                     self.get_logger().info(
                         f'yellow line has run out - the white dashes start '
