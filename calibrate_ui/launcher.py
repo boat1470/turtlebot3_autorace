@@ -86,6 +86,15 @@ def presets():
     return names or ['full', 'mission3', 'mission4', 'mission5', 'mission6']
 
 
+# A line that means the command is up, not just started. Until one turns up
+# the row's light is red ("starting..."); after it, green ("ready"). A command
+# with none here goes green as soon as it is running - there is nothing to
+# wait for that the launcher can see.
+READY = {
+    # turtlebot3_node's last line once the motors and odometry are live.
+    'robot': re.compile(r'\[diff_drive_controller\]: Run!'),
+}
+
 STOP_WAIT = 5.0     # s after each way of stopping before trying the next
 LOG_LINES = 2000    # kept in the output pane
 
@@ -99,6 +108,8 @@ class Job:
         self.shown = command                # what the window prints beside it
         self.proc = None
         self.stop_sent = None
+        self.ready_re = READY.get(tag)
+        self.ready = False
 
     def say(self, text):
         self.out.append(f'[{self.tag}] {text}')
@@ -118,6 +129,7 @@ class Job:
             self.proc = None
             return
         self.stop_sent = None
+        self.ready = False
         threading.Thread(target=self.pump, args=(self.proc,), daemon=True).start()
 
     def start(self):
@@ -128,6 +140,8 @@ class Job:
 
     def pump(self, proc):
         for line in proc.stdout:
+            if self.ready_re is not None and not self.ready and self.ready_re.search(line):
+                self.ready = True
             self.say(line.rstrip())
 
     def signal(self, sig):
@@ -157,7 +171,11 @@ class Job:
             return 'stopped', '#777'
         code = self.proc.poll()
         if code is None:
-            return ('stopping...', '#e0b000') if self.stop_sent else ('running', '#30b050')
+            if self.stop_sent:
+                return 'stopping...', '#e0b000'
+            if self.ready_re is not None:
+                return ('ready', '#30b050') if self.ready else ('starting...', '#e04040')
+            return 'running', '#30b050'
         if code == 0 or self.stop_sent is not None:
             return 'stopped', '#777'
         return f'exited {code}', '#e04040'
@@ -242,11 +260,13 @@ class Window:
                           command=lambda j=job: self.toggle(j))
             b.grid(row=i, column=0, pady=2, sticky='w')
             ttk.Label(box, text=job.name, width=22).grid(row=i, column=1, padx=8, sticky='w')
+            led = tk.Label(box, text='\u25cf', fg='#777', font=('TkDefaultFont', 14))
+            led.grid(row=i, column=2, sticky='w')
             s = tk.Label(box, text='stopped', width=12, anchor='w', fg='#777')
-            s.grid(row=i, column=2, sticky='w')
+            s.grid(row=i, column=3, sticky='w')
             ttk.Label(box, text=job.shown, foreground='#777'
-                      ).grid(row=i, column=3, padx=8, sticky='w')
-            self.rows.append((job, b, s))
+                      ).grid(row=i, column=4, padx=8, sticky='w')
+            self.rows.append((job, b, s, led))
 
         pi = [j for j in self.jobs if isinstance(j, RemoteJob)]
         if pi:
@@ -260,7 +280,7 @@ class Window:
             self.all_button = tk.Button(box, text='1  start all', height=2,
                                         font=('TkDefaultFont', 12, 'bold'),
                                         command=self.toggle_calib)
-            self.all_button.grid(row=0, column=0, columnspan=4, sticky='we', pady=(0, 6))
+            self.all_button.grid(row=0, column=0, columnspan=5, sticky='we', pady=(0, 6))
             for i, job in enumerate(self.calib):
                 row(box, i + 1, job)
             root.bind('1', lambda e: self.toggle_calib())
@@ -277,12 +297,14 @@ class Window:
                      width=12).grid(row=0, column=1, padx=8, sticky='w')
         b = tk.Button(box, text='start', width=7, command=self.toggle_mission)
         b.grid(row=0, column=0, pady=2, sticky='w')
+        led = tk.Label(box, text='\u25cf', fg='#777', font=('TkDefaultFont', 14))
+        led.grid(row=0, column=2, sticky='w')
         st = tk.Label(box, text='stopped', width=12, anchor='w', fg='#777')
-        st.grid(row=0, column=2, sticky='w')
+        st.grid(row=0, column=3, sticky='w')
         self.mission_cmd = ttk.Label(box, text=self.mission.shown, foreground='#777')
-        self.mission_cmd.grid(row=0, column=3, padx=8, sticky='w')
+        self.mission_cmd.grid(row=0, column=4, padx=8, sticky='w')
         self.preset.trace_add('write', lambda *a: self.pick_preset())
-        self.rows.append((self.mission, b, st))
+        self.rows.append((self.mission, b, st, led))
         self.mission_pending = False
 
         bar = ttk.Frame(root, padding=(8, 6, 8, 4))
@@ -358,10 +380,11 @@ class Window:
                 self.log.delete('1.0', f'{extra + 1}.0')
             if at_end:
                 self.log.see('end')
-        for job, b, s in self.rows:
+        for job, b, s, led in self.rows:
             job.tick()
             text, colour = job.status()
             s.config(text=text, fg=colour)
+            led.config(fg=colour)
             b.config(text='stop' if job.running() else 'start')
         if self.all_button is not None:
             self.all_button.config(

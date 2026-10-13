@@ -17,9 +17,13 @@ echo` terminals and an rqt_image_view:
     lane state   /detect/lane_state as words: none / yellow only / both /
                  white only
     error        /detect/lane - 500, the number control_lane steers by, on a
-                 bar from -500 to +500, with the speed factor
-                 (1 - |error|/500)^2.2 that the same error sets. Negative
-                 means the centre is left of the robot
+                 bar from -500 to +500, and beside it the braking row's error
+                 (/detect/lane_ahead - 500). Negative means the centre is
+                 left of the robot
+    speed        what the robot was actually told, off /cmd_vel - linear and
+                 angular, after control_lane's slow-down, gain scaling and
+                 wheel clamp - with the speed odom measured beside it, and a
+                 bar against the Burger's 0.22 m/s
     history      the last 10 s of error. Gaps are frames with no centre:
                  detect_lane publishes nothing on /detect/lane then
     reliability  /detect/white_line_reliability and yellow, 0-100
@@ -58,6 +62,7 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.executors import SingleThreadedExecutor
+from geometry_msgs.msg import TwistStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import BatteryState
@@ -100,6 +105,7 @@ HISTORY = 10.0      # s of error kept for the plot
 VIEW = (500, 300)   # the image is scaled to fit this
 BAR_W, BAR_H = 420, 28
 PLOT_H = 110
+WHEEL_MAX = 0.22    # m/s, the Burger's wheel limit - the speed bar's full scale
 DIAL = 130          # px, the heading dial
 
 
@@ -116,6 +122,7 @@ class Listener(Node):
         self.image_sub = None
 
         for topic, kind in (('/detect/lane', Float64),
+                            ('/detect/lane_ahead', Float64),
                             ('/detect/lane_state', UInt8),
                             ('/detect/white_line_reliability', UInt8),
                             ('/detect/yellow_line_reliability', UInt8),
@@ -128,6 +135,11 @@ class Listener(Node):
             self.create_subscription(
                 kind, topic, lambda msg, t=topic: self.on_value(t, msg.data), 10)
         self.create_subscription(Odometry, '/odom', self.on_odom, 10)
+        # control_lane's output, remapped to /cmd_vel; TwistStamped, the type
+        # the Jazzy turtlebot3_node takes.
+        self.create_subscription(
+            TwistStamped, '/cmd_vel',
+            lambda m: self.on_value('/cmd_vel', (m.twist.linear.x, m.twist.angular.z)), 10)
         self.create_subscription(
             BatteryState, '/battery_state',
             lambda m: self.on_value('/battery_state', (m.voltage, m.percentage)), 1)
@@ -139,6 +151,7 @@ class Listener(Node):
         yaw = math.degrees(math.atan2(2.0 * (q.w * q.z + q.x * q.y),
                                       1.0 - 2.0 * (q.y * q.y + q.z * q.z)))
         self.on_value('/odom', yaw)
+        self.on_value('/odom_v', msg.twist.twist.linear.x)
 
     def on_value(self, topic, value):
         now = time.monotonic()
@@ -261,6 +274,16 @@ class Window:
         ticks.pack(fill='x')
         for text, side in (('-500  left', 'left'), ('right  +500', 'right')):
             label(ticks, text=text, fg=dim, font=('TkDefaultFont', 8)).pack(side=side)
+
+        label(right, text='speed  (/cmd_vel, odom)', fg=dim, anchor='w'
+              ).pack(fill='x', pady=(10, 0))
+        self.speed_text = label(right, text='-', font=mono, anchor='w')
+        self.speed_text.pack(fill='x')
+        self.speed_bar = tk.Canvas(right, width=BAR_W, height=16, bg='#111',
+                                   highlightthickness=0)
+        self.speed_bar.pack(anchor='w', pady=(2, 0))
+        self.speed_fill = self.speed_bar.create_rectangle(0, 2, 0, 14, outline='')
+        self.speed_odom = self.speed_bar.create_line(0, 0, 0, 16, width=3, fill='#e8e8e8')
 
         label(right, text=f'error, last {HISTORY:.0f} s', fg=dim, anchor='w'
               ).pack(fill='x', pady=(10, 0))
@@ -388,16 +411,38 @@ class Window:
             self.bar.coords(self.bar_mark, mid, 0, mid, BAR_H)
         else:
             e = c - CENTER
-            speed = max(1 - abs(e) / CENTER, 0) ** 2.2
+            ah, ah_stale = get('/detect/lane_ahead')
+            ahead = '' if ah is None or ah_stale else f'   ahead {ah - CENTER:+5.0f}'
             colour = '#777' if stale else self.err_colour(e)
             self.err_text.config(
-                text=f'{e:+7.1f} px   centre {c:6.1f}   speed x{speed:.2f}'
+                text=f'{e:+7.1f} px   centre {c:6.1f}{ahead}'
                      + ('   (stale)' if stale else ''), fg=colour)
             x = mid + max(-1.0, min(1.0, e / CENTER)) * mid
             self.bar.coords(self.bar_fill, min(mid, x), 4, max(mid, x), BAR_H - 4)
             self.bar.itemconfig(self.bar_fill, fill=colour)
             self.bar.coords(self.bar_mark, x, 0, x, BAR_H)
         self.draw_plot(errors, now)
+
+        # speed: what was commanded, and what odom says happened
+        cmd, cmd_stale = get('/cmd_vel')
+        ov, _ = get('/odom_v')
+        if cmd is None:
+            self.speed_text.config(text='no /cmd_vel yet', fg='#777')
+            self.speed_bar.coords(self.speed_fill, 0, 2, 0, 14)
+        else:
+            v, w = cmd
+            frac = max(0.0, min(1.0, v / WHEEL_MAX))
+            colour = '#777' if cmd_stale else (
+                '#30b050' if frac >= 0.85 else '#e0b000' if frac >= 0.5 else '#e04040')
+            odom_txt = '' if ov is None else f'   odom {ov:5.3f}'
+            self.speed_text.config(
+                text=f'cmd {v:5.3f} m/s  w {w:+5.2f}{odom_txt}'
+                     + ('   (stale)' if cmd_stale else ''), fg=colour)
+            self.speed_bar.coords(self.speed_fill, 0, 2, frac * BAR_W, 14)
+            self.speed_bar.itemconfig(self.speed_fill, fill=colour)
+        if ov is not None:
+            x = max(0.0, min(1.0, ov / WHEEL_MAX)) * BAR_W
+            self.speed_bar.coords(self.speed_odom, x, 0, x, 16)
 
         # reliability
         for topic, (canvas, fill, text) in self.rel.items():
