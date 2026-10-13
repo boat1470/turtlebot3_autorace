@@ -229,11 +229,13 @@ class Window:
             pick.pack(fill='x', pady=(6, 0))
             self.which = tk.StringVar(value=IMAGES[0][1])
             for name, topic in IMAGES:
-                tk.Radiobutton(pick, text=name, value=topic, variable=self.which,
-                               command=self.switch, indicatoron=False, width=10,
-                               bg='#2a2a2a', fg=fg, selectcolor='#3a5a8a',
-                               activebackground='#3a3a3a', activeforeground=fg
-                               ).pack(side='left', padx=(0, 4))
+                rb = tk.Radiobutton(pick, text=name, value=topic, variable=self.which,
+                                    command=self.switch, indicatoron=False, width=10,
+                                    bg='#2a2a2a', fg=fg, selectcolor='#3a5a8a',
+                                    activebackground='#3a3a3a', activeforeground=fg)
+                rb.pack(side='left', padx=(0, 4))
+                if topic == OBSTACLE_IMAGE:
+                    self.obst_tab = rb
             self.img_info = tk.StringVar(value='')
             label(left, textvariable=self.img_info, fg=dim, anchor='w',
                   justify='left').pack(fill='x', pady=(4, 0))
@@ -492,6 +494,15 @@ class Window:
         b, b_stale = get('/detect/obstacle')
         sd, _ = get('/detect/obstacle_side')
         fr, _ = get('/detect/front_range')
+        # The obstacle tab button: red while detect_obstacle is not looking
+        # (it publishes nothing until mission_control arms construction,
+        # parking or the tunnel, or obstacle.always_on), green once it is.
+        tab = getattr(self, 'obst_tab', None)
+        if tab is not None:
+            live = b is not None and not b_stale
+            tab.config(bg='#2f7d46' if live else '#8a2a2a',
+                       selectcolor='#3fa05c' if live else '#b03a3a',
+                       activebackground='#3a8a52' if live else '#9a3a3a')
         if b is None:
             self.obst_text.config(text='obstacle: no report - armed? /scan up?', fg='#777')
         else:
