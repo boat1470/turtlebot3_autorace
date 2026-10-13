@@ -565,6 +565,24 @@ class MissionControl(Node):
         # with turned stuck at -20 degrees against a 12 degree window - past
         # the heading it was aiming for, still turning away from it.
         self.declare_parameter('construction.avoid.edge.give_up_s', 25.0)
+        # ARX: three beats instead of phases 1-6. After the spin to
+        # swing_heading_deg, one arc back the other way to arc1_end_deg - over
+        # the board and down past it - then an arc the first way back to
+        # corridor_heading_deg, which also takes the robot past the next board.
+        # Both ends on odom headings, mirrored when the swing goes right.
+        # speed is cut on each arc so the outer wheel stays inside wheel_max:
+        # v <= wheel_max / (1 + half_track / r).
+        self.declare_parameter('construction.avoid.edge.three_beat.enabled', False)
+        self.declare_parameter('construction.avoid.edge.three_beat.speed', 0.15)
+        self.declare_parameter('construction.avoid.edge.three_beat.arc1_radius_m', 0.28)
+        self.declare_parameter('construction.avoid.edge.three_beat.arc1_end_deg', 30.0)
+        self.declare_parameter('construction.avoid.edge.three_beat.arc2_radius_m', 0.20)
+        self.declare_parameter('construction.avoid.edge.three_beat.wheel_max', 0.21)
+        self.declare_parameter('construction.avoid.edge.three_beat.half_track', 0.08)
+        # End each arc this many ticks of turning before its heading, not on
+        # the first tick past it: a tick of 0.54 rad/s at 10 Hz is 3 degrees,
+        # and one past the first arc's end lands the robot 3 cm lower.
+        self.declare_parameter('construction.avoid.edge.three_beat.end_lead_ticks', 0.5)
 
         # --- mission 4, the parking sign ---------------------------------
         # Same shape as the other two sign hunts. What is different is the
@@ -2094,12 +2112,17 @@ class MissionControl(Node):
                 self.set_avoid(True, angular=self.edge_dir * rate, linear=speed)
             if (self.edge_reached(self.edge_headings()[0], self.edge_dir) if absolute
                     else abs(turned) >= swing):
-                self.edge_phase = 1
+                self.edge_phase = 10 if self.three_beat() else 1
                 self.edge_mark = self.pos
                 self.get_logger().info(
                     f'turned {turned:+.0f} deg '
                     f'{"on the spot" if self.edge_on_spot() else "off the corridor"}'
-                    f' - out {out:.2f} m before coming back')
+                    + (' - three beats: arcing over the board' if self.edge_phase == 10
+                       else f' - out {out:.2f} m before coming back'))
+            return
+
+        if self.edge_phase >= 10:
+            self.tick_three_beat(now)
             return
 
         if self.edge_phase == 1:
@@ -2181,6 +2204,55 @@ class MissionControl(Node):
             self.get_logger().warn(
                 f'still getting round a board after {waited:.0f} s '
                 f'(phase {self.edge_phase}, turned {turned:+.0f} deg) - '
+                f'handing back to the lane')
+            self.finish_edge('gave up getting round')
+
+    def three_beat(self):
+        """Whether the swerve after the spin is three_beat's two arcs (ARX)."""
+        return (self.get_parameter('construction.avoid.edge.three_beat.enabled').value
+                and self.get_parameter('construction.avoid.edge.absolute').value
+                and self.yaw is not None)
+
+    def tick_three_beat(self, now):
+        """Phases 10 and 11: the two arcs after the spin (ARX).
+
+        10 arcs back against the spin's way until arc1_end_deg - over the
+        board just met and down the far side of it. 11 arcs the spin's way
+        until the corridor heading. Phase 10 or more counts as both boards
+        done in finish_edge, which is what the second arc is for.
+        """
+        g = self.get_parameter
+        p = 'construction.avoid.edge.three_beat.'
+        corridor = g('construction.avoid.edge.corridor_heading_deg').value
+        wheel = g(p + 'wheel_max').value
+        half = g(p + 'half_track').value
+        if self.edge_phase == 10:
+            r, way = g(p + 'arc1_radius_m').value, -self.edge_dir
+            # arc1_end_deg is given for a swing to the left; mirrored when
+            # the swing went right.
+            target = corridor + self.edge_dir * (g(p + 'arc1_end_deg').value - corridor)
+        else:
+            r, way = g(p + 'arc2_radius_m').value, self.edge_dir
+            target = corridor
+        v = min(g(p + 'speed').value, wheel / (1.0 + half / max(r, 0.01)))
+        w = v / max(r, 0.01)
+        lead = math.degrees(w) / max(g('rate_hz').value, 0.1) * g(p + 'end_lead_ticks').value
+        if self.heading_off(target, self.yaw) * way <= lead:
+            took = now - self.stage_since
+            if self.edge_phase == 10:
+                self.edge_phase = 11
+                self.get_logger().info(
+                    f'over the board: facing {self.yaw:+.1f} deg after {took:.1f} s '
+                    f'- arcing back to {corridor:+.0f}')
+            else:
+                self.finish_edge(f'round both boards in three beats, {took:.1f} s')
+            return
+        self.set_avoid(True, angular=way * w, linear=v)
+        waited = now - self.stage_since
+        if waited > g('construction.avoid.edge.give_up_s').value:
+            self.get_logger().warn(
+                f'still in the three-beat swerve after {waited:.0f} s '
+                f'(phase {self.edge_phase}, facing {self.yaw:+.1f} deg) - '
                 f'handing back to the lane')
             self.finish_edge('gave up getting round')
 

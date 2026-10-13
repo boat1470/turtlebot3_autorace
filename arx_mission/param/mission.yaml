@@ -444,7 +444,8 @@
           # false goes back to the arc version, which double_swerve,
           # radius_m, second_radius_m and between_m belong to.
           in_place: true
-          in_place_rate: 0.6
+          # 1.5 for three_beat (was 0.6); slow_within_deg still eases it in.
+          in_place_rate: 1.5
 
           # Only for the first board in the zone.
           #
@@ -505,6 +506,26 @@
           # cut phase 6 off every time and handed back mid-turn, with a
           # warning that read like the robot was stuck when it was not.
           give_up_s: 90.0
+
+          # Three beats instead of phases 1-6 (2026-10-13, designed in
+          # docs/construction_3beat.png on curve_map's example boards):
+          #   1  spin on the spot to swing_heading_deg (180, facing up)
+          #   2  arc right, R arc1_radius_m, over B2 and down, to arc1_end_deg
+          #   3  arc left, R arc2_radius_m, back to corridor_heading_deg (90)
+          # then hug white, past B3 as well. Least gap 51 mm to B1, B2, B3
+          # and both lines on paper, about 7.5 s against ~28 s. B2 seen 4 cm
+          # early drops the B1 gap to 20 mm. Each arc's speed is cut so the
+          # outer wheel stays inside wheel_max (0.21, see control.wheel_max).
+          three_beat:
+            enabled: true
+            speed: 0.15
+            arc1_radius_m: 0.28
+            arc1_end_deg: 30.0
+            arc2_radius_m: 0.20
+            wheel_max: 0.21
+            half_track: 0.08
+            # end each arc half a tick early - a tick past arc 1 is 3 deg, 3 cm lower
+            end_lead_ticks: 0.5
 
     # --- mission 4, the parking sign -----------------------------------
     # Same shape as the other two sign hunts, with one condition they do not
