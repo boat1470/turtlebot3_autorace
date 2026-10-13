@@ -103,6 +103,7 @@ STAGE_WAIT_GREEN = 'wait_green'
 STAGE_DRIVE_TO_SIGN = 'drive_to_sign'
 STAGE_TURN = 'turn'
 STAGE_LEFT_SCRIPT = 'left_script'
+STAGE_ARC = 'sign_arc'
 STAGE_FOLLOW_SIDE = 'follow_side'
 STAGE_DRIVE_TO_CONSTRUCTION = 'drive_to_construction'
 STAGE_AVOID_CONSTRUCTION = 'avoid_construction'
@@ -292,6 +293,60 @@ class MissionControl(Node):
         # The heading is a world angle - see spawn_yaw_deg - so it is right
         # only if the robot was brought up facing along the start line.
         self.declare_parameter('intersection.left_script.enabled', False)
+        # ARX: the quicker left turn. On a left arrow, hold one fixed arc -
+        # linear speed and turn rate - for up to timeout_s, or until
+        # detect_lane has both lines of the branch (lane_state 2 for
+        # both_ticks ticks in a row), whichever is first, and then follow
+        # the lane by both lines. Takes precedence over left_script, which
+        # faces a heading, drives, turns and drives again, and took 18 s.
+        self.declare_parameter('intersection.left_arc.enabled', False)
+        self.declare_parameter('intersection.left_arc.speed', 0.10)      # m/s
+        self.declare_parameter('intersection.left_arc.rate', 0.6)        # rad/s, + is left
+        self.declare_parameter('intersection.left_arc.timeout_s', 2.0)
+        self.declare_parameter('intersection.left_arc.both_ticks', 3)
+        self.declare_parameter('intersection.left_arc.min_s', 0.5)
+        # ARX: the same for a right arrow, mirrored. rate is a magnitude; the
+        # arc turns right (negative angular).
+        self.declare_parameter('intersection.right_arc.enabled', False)
+        self.declare_parameter('intersection.right_arc.speed', 0.14)
+        self.declare_parameter('intersection.right_arc.rate', 0.7)
+        self.declare_parameter('intersection.right_arc.timeout_s', 2.0)
+        self.declare_parameter('intersection.right_arc.both_ticks', 3)
+        self.declare_parameter('intersection.right_arc.min_s', 0.5)
+        # ARX: a first beat before the right arc. The right arrow is
+        # confirmed while the robot is still in the left-hand curve before
+        # the junction (2A), so turning right there straight away swings it
+        # back mid-curve. First carry on round to align_heading_deg (odom),
+        # on an arc of its own, then turn right. align: false skips it.
+        self.declare_parameter('intersection.right_arc.align', False)
+        self.declare_parameter('intersection.right_arc.align_heading_deg', 0.0)
+        self.declare_parameter('intersection.right_arc.align_tolerance_deg', 5.0)
+        self.declare_parameter('intersection.right_arc.align_speed', 0.14)
+        self.declare_parameter('intersection.right_arc.align_rate', 0.7)
+        self.declare_parameter('intersection.right_arc.align_timeout_s', 2.0)
+        # ARX: then straight in on that heading for straight_m (odom), before
+        # the turn - into the junction, so the right turn starts where the
+        # right branch does. 0 skips it.
+        self.declare_parameter('intersection.right_arc.straight_m', 0.10)
+        self.declare_parameter('intersection.right_arc.straight_speed', 0.14)
+        self.declare_parameter('intersection.right_arc.straight_timeout_s', 3.0)
+        # ARX: end the right arc at this odom heading rather than on
+        # timeout_s, which then only backs it up. The angle comes out the
+        # same however late the sign was confirmed. use_end_heading: false
+        # keeps the time.
+        self.declare_parameter('intersection.right_arc.use_end_heading', False)
+        # ARX: after the right arc, steer by the white line rather than both,
+        # until odom crosses hug_until_deg turning the hug_release_turn way
+        # ('right' or 'left'), then go back to both lines. The right branch
+        # runs 5B, the U-turn 6A left round the island and the U-turn 7A
+        # right - and heading passes 180 twice, once in each U-turn, the
+        # first turning left and the second turning right. hug_timeout_s
+        # lets go regardless. hug_white: false keeps both lines throughout.
+        self.declare_parameter('intersection.right_arc.hug_white', False)
+        self.declare_parameter('intersection.right_arc.hug_until_deg', 180.0)
+        self.declare_parameter('intersection.right_arc.hug_release_turn', 'right')
+        self.declare_parameter('intersection.right_arc.hug_timeout_s', 25.0)
+        self.declare_parameter('intersection.right_arc.end_heading_deg', -70.0)
         self.declare_parameter('intersection.left_script.heading_deg', 180.0)
         self.declare_parameter('intersection.left_script.heading_tolerance_deg', 3.0)
         self.declare_parameter('intersection.left_script.first_m', 0.30)
@@ -365,6 +420,27 @@ class MissionControl(Node):
         # Stop where the sign was found. The debug step: nothing is built on
         # top of this yet.
         self.declare_parameter('construction.stop_after_detect', True)
+        # ARX: a bench aid. Stop in drive_to_construction the moment the
+        # white line drops out of the lane estimate - lane_state 0 or 1 for
+        # white_lost_ticks ticks in a row - so where and why it went can be
+        # looked at with the robot standing there. Ends the run.
+        self.declare_parameter('construction.stop_when_white_lost', False)
+        self.declare_parameter('construction.white_lost_ticks', 3)
+        # ARX: instead of stopping, drive a fixed arc of radius_m (angular =
+        # speed / radius_m, the side's way) until both lines are back - lane_state
+        # 2 for back_ticks ticks, after min_s - or timeout_s is up (0 = never), then
+        # follow the lane again. Takes precedence over stop_when_white_lost.
+        self.declare_parameter('construction.white_lost_arc.enabled', False)
+        self.declare_parameter('construction.white_lost_arc.side', 'right')
+        self.declare_parameter('construction.white_lost_arc.radius_m', 0.25)
+        self.declare_parameter('construction.white_lost_arc.speed', 0.10)
+        self.declare_parameter('construction.white_lost_arc.back_ticks', 2)
+        # What ends it: 'both' - lane_state 2; 'yellow' - 1 or 2, the yellow
+        # line in view with or without white; 'yellow_pair' - two yellow lines
+        # a lane apart (detect_lane in FOLLOW_YELLOW_PAIR, lane_state 2).
+        self.declare_parameter('construction.white_lost_arc.until', 'both')
+        self.declare_parameter('construction.white_lost_arc.min_s', 0.3)
+        self.declare_parameter('construction.white_lost_arc.timeout_s', 3.0)
         self.declare_parameter('construction.give_up_s', 120.0)
         # The board is turned -90 degrees in the world file like the arrow
         # is, so its broad faces are normal to the world x axis and it can
@@ -897,6 +973,21 @@ class MissionControl(Node):
         self.left_mark = None
         self.left_hold = None
         self.left_done = False
+        # ARX: the sign arc: which side it is turning, done, and how many
+        # ticks in a row with both lines.
+        self.arc_side = None            # 'left' or 'right'
+        self.arc_done = False
+        self.arc_both = 0
+        # ARX: right arc only - 0 aligning, 1 straight in, 2 the arc itself -
+        # when that beat began, and where the straight began.
+        self.arc_phase = 2
+        self.arc_phase_since = None
+        self.arc_mark = None
+        # ARX: the white-line hug after the right arc - on, since when, and
+        # the last heading, to see which way it is turning.
+        self.right_hug = False
+        self.right_hug_since = None
+        self.right_hug_yaw = None
         # Latest report from detect_obstacle. None until one arrives, which
         # is not the same as a clear corridor and is treated differently.
         self.blocked = None
@@ -929,6 +1020,9 @@ class MissionControl(Node):
         # have been in view without a break.
         self.parking_sign_at = None
         self.both_since = None
+        self.white_lost_ticks = 0       # ARX: for construction.stop_when_white_lost
+        self.wl_arc_since = None        # ARX: white_lost_arc running since
+        self.wl_arc_back = 0
         # ARX: ticks in a row with both yellow walls, and whether that has
         # released the slow-down for the rest of the way in.
         self.lot_pair_ticks = 0
@@ -1263,6 +1357,8 @@ class MissionControl(Node):
             self.tick_drive_to_sign(now)
         elif self.stage == STAGE_TURN:
             self.tick_turn(now)
+        elif self.stage == STAGE_ARC:
+            self.tick_arc(now)
         elif self.stage == STAGE_LEFT_SCRIPT:
             self.tick_left_script(now)
         elif self.stage == STAGE_FOLLOW_SIDE:
@@ -1352,6 +1448,17 @@ class MissionControl(Node):
                 f'ignored on heading)')
             if self.get_parameter('intersection.stop_after_detect').value:
                 self.stop(f'sign {name} - stopping here, as asked')
+            elif (SIDE_FOR_SIGN.get(winner) == FOLLOW_YELLOW and
+                    self.get_parameter('intersection.left_arc.enabled').value):
+                self.arc_side, self.arc_both = 'left', 0
+                self.go(STAGE_ARC, f'sign {name} - holding the left arc')
+            elif (SIDE_FOR_SIGN.get(winner) == FOLLOW_WHITE and
+                    self.get_parameter('intersection.right_arc.enabled').value):
+                self.arc_side, self.arc_both = 'right', 0
+                self.arc_phase = 0 if self.get_parameter(
+                    'intersection.right_arc.align').value else 1
+                self.arc_phase_since, self.arc_mark = now, self.pos
+                self.go(STAGE_ARC, f'sign {name} - holding the right arc')
             elif (SIDE_FOR_SIGN.get(winner) == FOLLOW_YELLOW and
                     self.get_parameter('intersection.left_script.enabled').value):
                 self.start_left_step(0, now)
@@ -1573,6 +1680,116 @@ class MissionControl(Node):
                 f'left script step {step} done, facing {self.yaw:+.1f} deg')
             self.start_left_step(step + 1, now)
 
+    def tick_arc(self, now):
+        """One fixed arc the arrow's way until both lines show, or time is up (ARX)."""
+        p = f'intersection.{self.arc_side}_arc.'
+        self.set_armed(MISSION_NONE)
+        self.set_driving(True)
+        # detect_lane on both lines throughout, so lane_state 2 means the
+        # branch's own pair is in view, and the hand-over is not cold.
+        self.set_follow_side(FOLLOW_AUTO)
+
+        # ARX: the right arc's first beat - carry on round to the heading.
+        if self.arc_side == 'right' and self.arc_phase == 0:
+            want = self.get_parameter(p + 'align_heading_deg').value
+            off = None if self.yaw is None else self.heading_off(want, self.yaw)
+            took = now - self.arc_phase_since
+            if (off is None or abs(off) <= self.get_parameter(p + 'align_tolerance_deg').value
+                    or took >= self.get_parameter(p + 'align_timeout_s').value):
+                self.get_logger().info(
+                    f'right arc: aligned in {took:.1f} s, facing '
+                    f'{"unknown" if self.yaw is None else f"{self.yaw:+.1f}"} deg '
+                    f'(want {want:+.0f}) - straight in')
+                self.arc_phase, self.arc_phase_since, self.arc_mark = 1, now, self.pos
+            else:
+                w = abs(self.get_parameter(p + 'align_rate').value)
+                self.set_avoid(True, angular=w if off > 0 else -w,
+                               linear=self.get_parameter(p + 'align_speed').value)
+                return
+
+        # ARX: the second beat - straight in, holding the aligned heading.
+        if self.arc_side == 'right' and self.arc_phase == 1:
+            want_m = self.get_parameter(p + 'straight_m').value
+            gone = self.dist_from(self.arc_mark)
+            took = now - self.arc_phase_since
+            if (want_m <= 0 or gone is None or gone >= want_m
+                    or took >= self.get_parameter(p + 'straight_timeout_s').value):
+                self.get_logger().info(
+                    f'right arc: straight {0.0 if gone is None else gone:.2f} m in '
+                    f'{took:.1f} s - now turning right')
+                self.arc_phase, self.arc_phase_since, self.arc_both = 2, now, 0
+            else:
+                w = 0.0
+                if self.yaw is not None and self.get_parameter(p + 'align').value:
+                    err = math.radians(self.heading_off(
+                        self.get_parameter(p + 'align_heading_deg').value, self.yaw))
+                    lim = abs(self.get_parameter(p + 'align_rate').value)
+                    w = max(-lim, min(lim, 1.5 * err))
+                self.set_avoid(True, angular=w,
+                               linear=self.get_parameter(p + 'straight_speed').value)
+                return
+
+        rate = abs(self.get_parameter(p + 'rate').value)
+        self.set_avoid(True, angular=rate if self.arc_side == 'left' else -rate,
+                       linear=self.get_parameter(p + 'speed').value)
+
+        # Timed from the arc's own start, not the align beat's.
+        start = self.arc_phase_since if self.arc_side == 'right' and self.arc_phase_since else self.stage_since
+        elapsed = now - start
+        self.arc_both = self.arc_both + 1 if self.lane_state == 2 else 0
+        need = self.get_parameter(p + 'both_ticks').value
+        if (self.arc_both >= need
+                and elapsed >= self.get_parameter(p + 'min_s').value):
+            self.finish_arc(f'both lines for {need} ticks after {elapsed:.1f} s')
+        elif (self.arc_side == 'right' and self.get_parameter(p + 'use_end_heading').value
+                and self.edge_reached(self.get_parameter(p + 'end_heading_deg').value, -1)):
+            self.finish_arc(f'reached {self.yaw:+.1f} deg after {elapsed:.1f} s')
+        elif elapsed >= self.get_parameter(p + 'timeout_s').value:
+            self.finish_arc(f'{elapsed:.1f} s up, lane_state {self.lane_state}')
+
+    def finish_arc(self, why):
+        self.set_avoid(True, angular=0.0, linear=0.0)
+        self.set_avoid(False)
+        self.arc_done = True
+        if self.arc_side == 'right' and self.get_parameter(
+                'intersection.right_arc.hug_white').value:
+            self.right_hug, self.right_hug_since, self.right_hug_yaw = True, self.now(), self.yaw
+            self.after_junction(f'{why} - steering by the white line until '
+                                f'{self.get_parameter("intersection.right_arc.hug_until_deg").value:+.0f} deg')
+            return
+        self.after_junction(f'{why} - following both lines from here')
+
+    def watch_right_hug(self, now):
+        """Let go of the white line once heading crosses hug_until_deg (ARX).
+
+        Crossing, not "within a tolerance of": the sign of the difference to
+        the target flips between one tick and the next, which a coarse tick
+        cannot step over. And only while turning the release way, since the
+        heading crosses the same value turning the other way first.
+        """
+        if not self.right_hug or self.yaw is None:
+            return
+        p = 'intersection.right_arc.'
+        prev, self.right_hug_yaw = self.right_hug_yaw, self.yaw
+        if now - self.right_hug_since > self.get_parameter(p + 'hug_timeout_s').value:
+            self.right_hug = False
+            self.get_logger().warn(
+                f'white-line hug timed out facing {self.yaw:+.1f} deg - both lines')
+            return
+        if prev is None:
+            return
+        target = self.get_parameter(p + 'hug_until_deg').value
+        a, b = self.heading_off(target, prev), self.heading_off(target, self.yaw)
+        step = self.heading_off(self.yaw, prev)          # + is turning left
+        want_left = self.get_parameter(p + 'hug_release_turn').value == 'left'
+        turning_ok = step > 0 if want_left else step < 0
+        if a * b <= 0 and abs(a) < 45 and abs(b) < 45 and turning_ok:
+            self.right_hug = False
+            self.get_logger().info(
+                f'heading crossed {target:+.0f} deg turning '
+                f'{"left" if want_left else "right"} after '
+                f'{now - self.right_hug_since:.1f} s - back to both lines')
+
     def finish_left_script(self, why):
         self.set_avoid(True, angular=0.0, linear=0.0)
         self.set_avoid(False)
@@ -1588,6 +1805,11 @@ class MissionControl(Node):
     def chosen_side(self):
         """The line to steer by, or auto when the arrow only picked a turn."""
         if self.construction_seen:
+            return FOLLOW_AUTO
+        # The sign arc hands over to both lines, whatever follow_chosen_line says.
+        if self.right_hug:
+            return FOLLOW_WHITE
+        if self.arc_done:
             return FOLLOW_AUTO
         # The left script decides for itself, whatever follow_chosen_line says.
         if self.left_done:
@@ -1612,20 +1834,87 @@ class MissionControl(Node):
 
     def tick_follow_side(self):
         """Just drive. Nothing is being looked for."""
+        self.watch_right_hug(self.now())
         self.set_armed(MISSION_NONE)
         self.set_driving(True)
         self.set_follow_side(self.chosen_side())
         self.set_avoid(False)
 
+    def tick_white_lost_arc(self, now):
+        """A fixed-radius arc while the white line is out of view (ARX)."""
+        p = 'construction.white_lost_arc.'
+        v = self.get_parameter(p + 'speed').value
+        w = v / max(self.get_parameter(p + 'radius_m').value, 0.05)
+        if self.get_parameter(p + 'side').value != 'left':
+            w = -w
+        self.set_avoid(True, angular=w, linear=v)
+        elapsed = now - self.wl_arc_since
+        # Both lines by default, not just white: white alone is still the
+        # inner line only, with the yellow fallback that latched onto the board.
+        until = self.get_parameter(p + 'until').value
+        found = (1, 2) if until == 'yellow' else (2,)   # yellow_pair: 2 in pair mode
+        self.wl_arc_back = self.wl_arc_back + 1 if self.lane_state in found else 0
+        need = self.get_parameter(p + 'back_ticks').value
+        why = None
+        if self.wl_arc_back >= need and elapsed >= self.get_parameter(p + 'min_s').value:
+            why = f'{until} for {need} ticks'
+        elif 0 < self.get_parameter(p + 'timeout_s').value <= elapsed:
+            why = f'{elapsed:.1f} s up, lane_state {self.lane_state}'
+        if why is not None:
+            self.wl_arc_since = None
+            self.set_avoid(True, angular=0.0, linear=0.0)
+            self.set_avoid(False)
+            where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+            self.get_logger().info(
+                f'white-lost arc done after {elapsed:.1f} s ({why}), facing {where} '
+                f'- following the lane again')
+
     def tick_drive_to_construction(self, now):
         """Carry on down the course until the construction sign is read."""
+        self.watch_right_hug(now)
         self.set_driving(True)
         self.sign_hunt_speed()
         self.set_avoid(False)
         # Still steering by whatever the junction chose. Going back to both
         # lines happens when the sign is read, not on the way to it.
-        self.set_follow_side(self.chosen_side())
+        # ARX: white_lost_arc's 'yellow_pair' has detect_lane look for the
+        # yellow pair for as long as the arc runs, so lane_state 2 means it.
+        if (self.wl_arc_since is not None
+                and self.get_parameter('construction.white_lost_arc.until').value == 'yellow_pair'):
+            self.set_follow_side(FOLLOW_YELLOW_PAIR)
+        else:
+            self.set_follow_side(self.chosen_side())
         self.set_armed(MISSION_CONSTRUCTION)
+
+        # ARX: see construction.white_lost_arc / stop_when_white_lost.
+        if self.wl_arc_since is not None:
+            self.tick_white_lost_arc(now)
+            return
+        # Right branch only: there the inner line is white and leaves the
+        # view in 7A. On the left branch white is the outer line, and a right
+        # arc there would be the wrong way.
+        arc_on = (self.get_parameter('construction.white_lost_arc.enabled').value
+                  and self.arc_side == 'right')
+        if arc_on or self.get_parameter('construction.stop_when_white_lost').value:
+            self.white_lost_ticks = (self.white_lost_ticks + 1
+                                     if self.lane_state in (0, 1) else 0)
+            need = self.get_parameter('construction.white_lost_ticks').value
+            if self.white_lost_ticks >= need:
+                where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+                self.white_lost_ticks = 0
+                if arc_on:
+                    self.wl_arc_since, self.wl_arc_back = now, 0
+                    if self.get_parameter('construction.white_lost_arc.until').value == 'yellow_pair':
+                        self.set_follow_side(FOLLOW_YELLOW_PAIR)
+                    self.get_logger().info(
+                        f'white line gone for {need} ticks (lane_state {self.lane_state}, '
+                        f'facing {where}) - arcing until '
+                        f'{self.get_parameter("construction.white_lost_arc.until").value} is in view')
+                    self.tick_white_lost_arc(now)
+                    return
+                self.stop(f'white line gone for {need} ticks (lane_state '
+                          f'{self.lane_state}, facing {where}) - stopping here, as asked')
+                return
 
         winner, votes = self.sign_majority({SIGN_CONSTRUCTION})
         if winner is not None:

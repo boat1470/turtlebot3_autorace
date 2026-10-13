@@ -137,7 +137,17 @@ class ControlLane(Node):
         # with the gains tuned at 0.07 m/s was what kept the robot inside the
         # curves. With speed_ref scaling the gain instead, the cut can be
         # gentler: 1.0 is linear, 1.5 keeps 0.77 x at 100 px.
-        self.declare_parameter('control.slow_power', 2.2),
+        self.declare_parameter('control.slow_power', 2.2)
+        # ARX: what one wheel can do, and half the track. In a turn the outer
+        # wheel runs at v + |omega| x half_track, and the Burger's wheels top
+        # out at 0.22 m/s: asked for more, the wheel saturates and the turn
+        # comes out wider than commanded - into the outer line. So v is cut
+        # to keep the outer wheel inside wheel_max, and the straights can run
+        # at the wheel limit without the curves paying for it. 0 turns it off.
+        # 0.21: a linear.x of 0.22 reaches the OpenCR as 22 cm/s and is
+        # refused outright - the robot does not move (2026-10-13).
+        self.declare_parameter('control.wheel_max', 0.21)
+        self.declare_parameter('control.half_track', 0.08)
         self.declare_parameter('control.ahead_max_age_s', 0.5)
         self.ahead_error = None
         self.ahead_time = None
@@ -251,22 +261,33 @@ class ControlLane(Node):
             self.MAX_VEL * (max(1 - speed_error / 500, 0)
                             ** self.get_parameter('control.slow_power').value), ceiling)
 
-        # ARX: see control.speed_ref. Floored at 0.04 m/s so a robot slowed
-        # right down by a big error can still steer its way out of it.
+        # ARX: see control.speed_ref and control.wheel_max. The gain scales
+        # with the speed, and the speed is cut for the wheels once omega is
+        # known - so it goes round twice, the second pass with the cut speed,
+        # and the pair that goes out is consistent. Floored at 0.04 m/s so a
+        # robot slowed right down by a big error can still steer out of it.
         ref = self.get_parameter('control.speed_ref').value
-        scale = max(twist.linear.x, 0.04) / ref if ref > 0 else 1.0
-
-        angular_z = (self.get_parameter('control.kp').value * scale * error +
-                     self.get_parameter('control.kd').value * derivative)
-        angular = -max(angular_z, -2.0) if angular_z < 0 else -min(angular_z, 2.0)
-        # ARX: rate limit. Whatever the error does, the wheels are not asked
-        # to change what they are doing faster than this.
-        step = self.get_parameter('control.max_angular_step').value * scale
-        if step > 0 and self.last_angular is not None:
-            angular = max(min(angular, self.last_angular + step),
-                          self.last_angular - step)
+        kp = self.get_parameter('control.kp').value
+        kd = self.get_parameter('control.kd').value
+        step = self.get_parameter('control.max_angular_step').value
+        wheel_max = self.get_parameter('control.wheel_max').value
+        half_track = self.get_parameter('control.half_track').value
+        linear = twist.linear.x
+        for _ in range(2):
+            scale = max(linear, 0.04) / ref if ref > 0 else 1.0
+            angular_z = kp * scale * error + kd * derivative
+            angular = -max(angular_z, -2.0) if angular_z < 0 else -min(angular_z, 2.0)
+            # ARX: rate limit. Whatever the error does, the wheels are not
+            # asked to change what they are doing faster than this.
+            if step > 0 and self.last_angular is not None:
+                angular = max(min(angular, self.last_angular + step * scale),
+                              self.last_angular - step * scale)
+            if wheel_max <= 0:
+                break
+            linear = max(0.0, min(twist.linear.x, wheel_max - abs(angular) * half_track))
         self.last_angular = angular
         twist.angular.z = angular
+        twist.linear.x = linear
         self.publish_cmd_vel(twist)
 
     # ARX: added.

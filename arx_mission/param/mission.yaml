@@ -79,7 +79,7 @@
       # of both lines. Only means anything with follow_chosen_line true -
       # false there is auto for both arrows already. The left arrow has its
       # own switch, left_script.follow_yellow_after.
-      right_follow_white_after: true
+      right_follow_white_after: false
 
       # A left arrow is driven by a fixed script instead of `turn` below
       # (2026-10-11): on the real course the yellow line of the left branch
@@ -97,6 +97,68 @@
       # heading_deg is a world angle, 0 = the way the robot faced when
       # robot.launch.py came up - so bring the robot up on the start line,
       # facing along it, or this heading means something else.
+      # The quicker left turn (2026-10-13): on a left arrow, hold one fixed
+      # arc - speed and rate - until detect_lane has both lines of the
+      # branch (lane_state 2 for both_ticks ticks) or timeout_s is up, then
+      # follow the lane by both lines. Takes precedence over left_script
+      # below, which took 18 s. speed 0.14 at rate 0.8 is a 0.175 m radius,
+      # 92 degrees in 2 s, with the outer wheel at 0.204 m/s - about as
+      # fast as the 0.22 wheel limit allows on this radius. Too tight at
+      # the end (hugging the inner yellow): rate 0.7.
+      left_arc:
+        enabled: true
+        speed: 0.14          # m/s
+        # 0.8 (R 0.175) ended the arc 56 px / 38 mm left of the lane centre
+        # on 2026-10-13 - inside the 42 mm margin, lane following pulled it
+        # back in 2 s. 0.7 is R 0.20, 80 degrees in 2 s, the rest to the lane.
+        rate: 0.7            # rad/s, + is left
+        timeout_s: 2.0
+        both_ticks: 3
+        min_s: 0.5           # do not hand over before this, even with both lines
+      # The same for a right arrow, mirrored: the arc turns right. Same
+      # numbers to start with - the right branch leaves the junction on the
+      # same 0.25 m radius - but not yet measured on the course.
+      right_arc:
+        enabled: true
+        speed: 0.14
+        # 0.7 (R 0.20) was too tight on the course, 2026-10-13. Plain lane
+        # following instead turned 5B at R 0.33 - only 55 degrees before
+        # the far row saw 6A and pulled left - cutting inside 5B. 0.55 is
+        # R 0.25, the course's own radius; 2.5 s is 79 degrees.
+        rate: 0.55           # rad/s, magnitude - R 0.25
+        timeout_s: 2.5
+        # First beat: the right arrow is confirmed while still in the left
+        # curve before the junction (2A). Carry on round, on this arc, to
+        # align_heading_deg (odom), then turn right. Whatever the dial in
+        # lane_debug reads when the robot points straight up the junction
+        # is the number to put here.
+        align: true
+        align_heading_deg: 180.0
+        align_tolerance_deg: 5.0
+        align_speed: 0.14
+        align_rate: 0.7      # rad/s, magnitude; turns whichever way is shorter
+        align_timeout_s: 2.0
+        # Second beat: straight in on that heading, into the junction, before
+        # the right turn. 0 skips it.
+        straight_m: 0.00
+        straight_speed: 0.14
+        straight_timeout_s: 3.0
+        # End the right arc at this odom heading; timeout_s then only backs
+        # it up. Same angle however late the sign was confirmed.
+        use_end_heading: false
+        end_heading_deg: -70.0
+        # After the arc, steer by the white line instead of both until odom
+        # crosses hug_until_deg turning hug_release_turn, then both lines
+        # again (2026-10-13). The right branch passes 180 twice: halfway
+        # round 6A turning left, and halfway round 7A turning right -
+        # 'right' lets go in 7A, 'left' in 6A. hug_timeout_s is the backstop.
+        hug_white: false     # off 2026-10-13: both lines after the arc
+        hug_until_deg: 180.0
+        hug_release_turn: right
+        hug_timeout_s: 25.0
+        both_ticks: 3
+        min_s: 0.5
+      # The fixed four-move version. Only used when left_arc is off.
       left_script:
         enabled: true
         heading_deg: 180.0
@@ -217,6 +279,30 @@
       # Stop where the sign was found. The debug step from while the
       # detection was being trusted. Off now that there is a stage after it.
       stop_after_detect: false
+      # Stop the moment the white line drops out (lane_state 0 or 1 for
+      # white_lost_ticks ticks) on the way to the sign - to see where and
+      # why with the robot standing there. Ends the run: false to score.
+      stop_when_white_lost: false
+      white_lost_ticks: 1
+      # Instead of stopping: once white is gone for white_lost_ticks, drive
+      # one fixed arc of radius_m (angular = speed / radius_m) the side's
+      # way until both lines are back (lane_state 2 for back_ticks, after
+      # min_s) - white alone does not count - or timeout_s is up (0 =
+      # never), then follow the lane again. For 7A, where
+      # the inner white line leaves the view and yellow latches onto the
+      # orange board. Wins over stop_when_white_lost.
+      white_lost_arc:
+        enabled: true
+        side: right
+        radius_m: 0.25
+        speed: 0.14
+        back_ticks: 2
+        # both: lane_state 2. yellow: 1 or 2 - yellow in view, white or not.
+        # yellow_pair: two yellow lines a lane apart (detect_lane switched to
+        # the yellow pair for the arc).
+        until: both
+        min_s: 0.3
+        timeout_s: 0.0
 
       # Measured from the moment the junction is behind us, and the board is
       # most of the way round the course from there.
@@ -973,6 +1059,16 @@
       # intersection.stop_after_detect true (19.6 s on 2026-10-12 at 2.2,
       # max_vel 0.15, no speed_ref).
       slow_power: 1.0
+      # The outer wheel runs at v + |omega| x half_track and tops out at
+      # wheel_max (Burger: 0.22 m/s); v is cut to keep it there, so a turn
+      # is never asked for that the wheels would round off wider. With this
+      # the straights can run at the wheel limit (2026-10-13). 0 = off.
+      # 2026-10-13, notes/step_test.py from rest, angular 0: 0.22 does not
+      # move the robot at all, 0.21 and 0.05 do. turtlebot3_node sends
+      # int(linear.x * 100) cm/s to the OpenCR, so 0.22 arrives as 22 and
+      # is refused, 0.217 as 21 and is not. Every 0.22 ceiling is 0.21.
+      wheel_max: 0.21
+      half_track: 0.08
 
       # The ceiling that actually bites first. linear.x is
       #
@@ -990,7 +1086,10 @@
       # 2026-10-12: the ladder with speed_ref on is 0.15 / 0.18 / 0.20 -
       # stop at the last that holds 19A, 13A, 4B->7A and 12A->13A in the
       # lane. 0.15 is where the 19.6 s START -> sign was measured.
-      max_vel: 0.20
+      # 0.22 is the wheel limit itself; wheel_max above keeps the curves
+      # honest at it. 11.7 s START -> sign at 0.20 (2026-10-13).
+      # 0.21, not 0.22: see wheel_max.
+      max_vel: 0.21
 
     # The original control_lane hard-codes min(..., 0.05) here. Left at the
     # same value so behaviour is unchanged, but it has to be reachable: the
@@ -1001,4 +1100,4 @@
     # board passes before detect_sign gets 5 of 7 reports to agree.
     speed:
       sign_hunt: 0.0
-      max: 0.20
+      max: 0.21           # 0.22 is refused by the OpenCR - see control.wheel_max
