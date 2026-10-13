@@ -12,7 +12,9 @@
       # out. Stopping at 0.25 m leaves about 0.16 m between the bumper and
       # the board - enough to see it coming at 0.07 m/s without stopping so
       # early that the gap beside it is out of reach.
-      stop_distance: 0.25
+      # 0.35 on 2026-10-13: the robot now comes at the boards at lane speed
+      # (up to 0.21 m/s), and runs on 4-6 cm past the trigger before it turns.
+      stop_distance: 0.35
 
       # Half the width of each window the scan is tested in. Three windows
       # are used, all this wide: one straddling the robot's own track and
