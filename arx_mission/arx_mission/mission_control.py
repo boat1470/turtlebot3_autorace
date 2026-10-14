@@ -618,6 +618,30 @@ class MissionControl(Node):
         # it does not have to be in view at the same moment - its votes
         # expire after vote_max_age_s, and the lines may come right later.
         self.declare_parameter('parking.both_lines_s', 2.0)
+        # ARX: a bench aid. Once the parking sign is read and both lines have
+        # held both_lines_s, do not turn in: carry on, and stop the moment the
+        # yellow line then drops out - yellow reliability under min_reliability
+        # for yellow_lost_ticks ticks in a row - so where it went can be looked
+        # at with the robot standing there. Reliability, not lane_state: the
+        # steering is pinned to white here, so lane_state is 3 regardless.
+        self.declare_parameter('parking.stop_when_yellow_lost', False)
+        self.declare_parameter('parking.yellow_lost_ticks', 3)
+        # ARX: instead of stopping there, turn in at 17B: pre_m straight on,
+        # then one left arc of radius_m (angular = speed / radius_m) until odom
+        # reads end_heading_deg, then drive_to_lot. R 0.25 from the lane
+        # centre (x 3.75) is the arc round 17B's own centre, and comes out
+        # mid-way between the lot's two yellow walls. Wins over the stop.
+        self.declare_parameter('parking.left_arc.enabled', False)
+        self.declare_parameter('parking.left_arc.pre_m', 0.0)
+        self.declare_parameter('parking.left_arc.radius_m', 0.25)
+        self.declare_parameter('parking.left_arc.speed', 0.12)
+        self.declare_parameter('parking.left_arc.end_heading_deg', -90.0)
+        self.declare_parameter('parking.left_arc.timeout_s', 6.0)
+        # After the arc: follow the yellow pair down the way in, and lock
+        # end_heading_deg once the pair is lost for pair_lost_ticks - or if it
+        # has not come into view within pair_wait_s of the arc ending.
+        self.declare_parameter('parking.left_arc.pair_lost_ticks', 3)
+        self.declare_parameter('parking.left_arc.pair_wait_s', 1.0)
 
         # The parking lot itself (ARX). Measured off the course texture, which
         # is an exact map of the track - see notes/track_geometry.py:
@@ -644,6 +668,11 @@ class MissionControl(Node):
         # Driven by this node rather than by lane following, so it needs its
         # own speed. The same creep the construction swings use.
         self.declare_parameter('lot.speed', 0.04)
+        # ARX: while holding the heading, v is cut so the outer wheel
+        # (v + |omega| x half_track) stays inside wheel_max - a 0.22 is
+        # refused by the OpenCR outright.
+        self.declare_parameter('lot.wheel_max', 0.21)
+        self.declare_parameter('lot.half_track', 0.08)
         # ARX: lane-following speed ceiling while turning off the road into
         # the lot, published on /control/max_vel until the corridor heading is
         # held. The turn follows a yellow arc of 0.11 m radius, and at the
@@ -740,6 +769,35 @@ class MissionControl(Node):
         self.declare_parameter('bay.park.enabled', True)
         self.declare_parameter('bay.park.turn_deg', 90.0)
         self.declare_parameter('bay.park.turn_rate', 0.6)
+        # ARX: phase 0 turns to an odom heading rather than through turn_deg,
+        # so where the robot stopped facing does not carry into the bay. The
+        # heading is the one that points the tail at the bay: facing up (180)
+        # backs into the robot's left bay, facing down (0) into its right,
+        # with the robot stopped facing -90 down the lot. Eased in over the
+        # last slow_within_deg, down to a quarter of turn_rate.
+        self.declare_parameter('bay.park.absolute', False)
+        self.declare_parameter('bay.park.face_left_deg', 180.0)
+        self.declare_parameter('bay.park.face_right_deg', 0.0)
+        self.declare_parameter('bay.park.slow_within_deg', 20.0)
+        # ARX: the reverse into the bay at its own speed (0 = bay.park.speed),
+        # ended reverse_lead_ticks of travel early so the stop lands on
+        # into_*_m: odometry reports a tick behind the command.
+        self.declare_parameter('bay.park.reverse_speed', 0.0)
+        self.declare_parameter('bay.park.reverse_lead_ticks', 1.5)
+        # ARX: the way out. exit_speed for the arc and the straight after it
+        # (0 = bay.park.speed), cut on the arc so the outer wheel stays inside
+        # lot.wheel_max. With exit_absolute the arc ends on exit_heading_<bay>_deg
+        # rather than after turn_deg, half a tick early, and the straight
+        # holds that heading until the yellow line is in view - yellow
+        # reliability over parking.min_reliability for rejoin_ticks - rather
+        # than any lane_state, which the lot's white dashes would satisfy.
+        self.declare_parameter('bay.park.exit_speed', 0.0)
+        self.declare_parameter('bay.park.exit_absolute', False)
+        # One per bay: the left bay's arc comes round from 180 turning right,
+        # the right bay's from 0 turning left, so they finish from opposite
+        # sides of the way-out heading and land differently.
+        self.declare_parameter('bay.park.exit_heading_left_deg', 90.0)
+        self.declare_parameter('bay.park.exit_heading_right_deg', 90.0)
         self.declare_parameter('bay.park.speed', 0.04)
         # Two distances, not one, because the robot does not stop in the
         # middle of the column. It stops at x 0.476 against a middle of
@@ -1039,6 +1097,11 @@ class MissionControl(Node):
         self.parking_sign_at = None
         self.both_since = None
         self.white_lost_ticks = 0       # ARX: for construction.stop_when_white_lost
+        self.yellow_lost_ticks = 0      # ARX: for parking.stop_when_yellow_lost
+        self.parking_both_held = False
+        self.park_arc_phase = None       # ARX: parking.left_arc - 0 straight, 1 arc
+        self.lot_from_arc = False
+        self.lot_pair_lost = 0
         self.wl_arc_since = None        # ARX: white_lost_arc running since
         self.wl_arc_back = 0
         # ARX: ticks in a row with both yellow walls, and whether that has
@@ -1055,6 +1118,7 @@ class MissionControl(Node):
         # Latest report from detect_obstacle's side wedges, and the bay
         # chosen from it.
         self.side = None
+        self.side_at = None              # ARX: when self.side last came in
         self.bay = None
         # Latest report from detect_level, and how many ticks in a row it has
         # said the same thing.
@@ -1170,6 +1234,7 @@ class MissionControl(Node):
     def on_side(self, msg):
         """Which side of the robot detect_obstacle says is taken (ARX)."""
         self.side = msg.data
+        self.side_at = self.now()
 
     def on_front(self, msg):
         """Nearest thing in the wide wedge ahead, in metres (ARX)."""
@@ -1892,7 +1957,11 @@ class MissionControl(Node):
         self.watch_right_hug(now)
         self.set_driving(True)
         self.sign_hunt_speed()
-        self.set_avoid(False)
+        # ARX: set_avoid(False) comes after white_lost_arc below, not here.
+        # Sent here, every tick of the arc published "off" and then "on",
+        # control_lane dropped arc commands that landed in between and
+        # slipped lane-following ones in - run 1014_2251, 7A: the arc's first
+        # 0.4 s never reached the wheels and the robot kept turning left.
         # Still steering by whatever the junction chose. Going back to both
         # lines happens when the sign is read, not on the way to it.
         # ARX: white_lost_arc's 'yellow_pair' has detect_lane look for the
@@ -1933,6 +2002,10 @@ class MissionControl(Node):
                 self.stop(f'white line gone for {need} ticks (lane_state '
                           f'{self.lane_state}, facing {where}) - stopping here, as asked')
                 return
+
+        # Lane following has the wheel - the white_lost_arc above returns
+        # before this while it runs, and hands back itself when it ends.
+        self.set_avoid(False)
 
         winner, votes = self.sign_majority({SIGN_CONSTRUCTION})
         if winner is not None:
@@ -2338,6 +2411,9 @@ class MissionControl(Node):
         has gone back to an ordinary single lane, which is where the parking
         board actually is.
         """
+        if self.park_arc_phase is not None:
+            self.tick_parking_left_arc(now)
+            return
         self.set_driving(True)
         self.sign_hunt_speed()
         self.set_avoid(False)
@@ -2370,7 +2446,39 @@ class MissionControl(Node):
         held = 0.0 if self.both_since is None else now - self.both_since
         need_both = self.get_parameter('parking.require_both_lines').value
         need_s = self.get_parameter('parking.both_lines_s').value
-        if self.parking_sign_at is not None and (not need_both or held >= need_s):
+        # ARX: parking.stop_when_yellow_lost - after the sign and the both-lines
+        # hold, carry on by white instead of turning in, and stop once yellow
+        # then drops out.
+        if self.get_parameter('parking.stop_when_yellow_lost').value:
+            if (not self.parking_both_held and self.parking_sign_at is not None
+                    and (not need_both or held >= need_s)):
+                self.parking_both_held = True
+                self.get_logger().info(
+                    f'both lines for {held:.1f} s after the parking sign - '
+                    f'watching for the yellow line to drop out')
+            if self.parking_both_held:
+                floor = self.get_parameter('parking.min_reliability').value
+                gone = self.yellow_ok is None or self.yellow_ok < floor
+                self.yellow_lost_ticks = self.yellow_lost_ticks + 1 if gone else 0
+                need = self.get_parameter('parking.yellow_lost_ticks').value
+                if self.yellow_lost_ticks >= need:
+                    where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+                    if self.get_parameter('parking.left_arc.enabled').value:
+                        self.park_arc_phase, self.park_arc_since = 0, now
+                        self.park_arc_mark, self.park_arc_yaw, self.park_arc_turn = \
+                            self.pos, self.yaw, 0.0
+                        self.get_logger().info(
+                            f'yellow line gone for {need} ticks (yellow {self.yellow_ok}, '
+                            f'facing {where}) - turning left into the lot at 17B')
+                        self.tick_parking_left_arc(now)
+                        return
+                    self.stop(f'parking sign read {now - self.parking_sign_at:.1f} s ago, '
+                              f'both lines held, then the yellow line went for {need} '
+                              f'ticks (yellow {self.yellow_ok}, white {self.white_ok}, '
+                              f'lane_state {self.lane_state}, facing {where}) - '
+                              f'stopping here, as asked')
+                    return
+        elif self.parking_sign_at is not None and (not need_both or held >= need_s):
             self.get_logger().info(
                 f'both lines for {held:.1f} s (yellow {self.yellow_ok}, white '
                 f'{self.white_ok}) - over to the yellow line')
@@ -2404,6 +2512,52 @@ class MissionControl(Node):
                 f'white {self.white_ok}, '
                 f'last {len(recent)}: {recent}) - carrying on')
             self.go(STAGE_FOLLOW_SIDE, 'gave up on the parking sign')
+
+    def tick_parking_left_arc(self, now):
+        """Straight pre_m, then a left arc to end_heading_deg, then the lot (ARX)."""
+        p = 'parking.left_arc.'
+        g = self.get_parameter
+        self.set_driving(True)
+        self.set_armed(MISSION_NONE)
+        self.set_follow_side(FOLLOW_AUTO)
+        if self.yaw is not None and self.park_arc_yaw is not None:
+            self.park_arc_turn += (self.yaw - self.park_arc_yaw + 180.0) % 360.0 - 180.0
+        self.park_arc_yaw = self.yaw
+        v = g(p + 'speed').value
+        took = now - self.park_arc_since
+        if self.park_arc_phase == 0:
+            gone = self.dist_from(self.park_arc_mark)
+            if gone is None or gone >= g(p + 'pre_m').value:
+                self.park_arc_phase = 1
+                self.get_logger().info(
+                    f'parking arc: {0.0 if gone is None else gone:.2f} m straight - '
+                    f'now left, R {g(p + "radius_m").value:.2f}')
+            else:
+                self.set_avoid(True, angular=0.0, linear=v)
+                return
+        w = v / max(g(p + 'radius_m').value, 0.05)
+        target = g(p + 'end_heading_deg').value
+        # Half a tick of turning early, as three_beat does.
+        lead = math.degrees(w) / max(g('rate_hz').value, 0.1) * 0.5
+        done = self.yaw is not None and self.heading_off(target, self.yaw) <= lead
+        if done or took >= g(p + 'timeout_s').value:
+            self.set_avoid(True, angular=0.0, linear=0.0)
+            self.set_avoid(False)
+            self.park_arc_phase = None
+            # drive_to_lot then follows the yellow pair - no slow approach,
+            # no waiting for the heading to settle - and locks the arc's own
+            # heading once the pair is lost. See tick_drive_to_lot.
+            self.lot_turn = self.park_arc_turn
+            self.lot_from_arc = True
+            self.lot_pair_lost = 0
+            where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+            why = (f'turned {self.park_arc_turn:+.0f} deg' if done
+                   else f'{took:.1f} s up, turned {self.park_arc_turn:+.0f} deg')
+            self.go(STAGE_DRIVE_TO_LOT,
+                    f'parking arc done ({why}, facing {where}) - following the '
+                    f'yellow pair into the lot')
+            return
+        self.set_avoid(True, angular=w, linear=v)
 
     def lot_gone(self):
         """Metres travelled since the mouth came into view, or None (ARX)."""
@@ -2476,7 +2630,36 @@ class MissionControl(Node):
         self.set_driving(True)
         self.set_armed(MISSION_NONE)
 
-        if self.hold_heading_deg is None:
+        if self.hold_heading_deg is None and self.lot_from_arc:
+            # ARX: in off parking.left_arc. The yellow pair until it is lost,
+            # then the arc's heading. No slow approach, no settling.
+            p = 'parking.left_arc.'
+            self.set_avoid(False)
+            self.set_follow_side(FOLLOW_YELLOW_PAIR)
+            if self.lane_state == 2:
+                self.lot_pair_ticks += 1
+                self.lot_pair_lost = 0
+                if (not self.lot_pair_seen and self.lot_pair_ticks
+                        >= self.get_parameter('lot.pair_release_ticks').value):
+                    self.lot_pair_seen = True
+                    self.get_logger().info('both yellow walls in view - following them')
+            else:
+                self.lot_pair_ticks = 0
+                self.lot_pair_lost += 1
+            why = None
+            if (self.lot_pair_seen and self.lot_pair_lost
+                    >= self.get_parameter(p + 'pair_lost_ticks').value):
+                why = (f'yellow pair lost for {self.lot_pair_lost} ticks '
+                       f'(lane_state {self.lane_state})')
+            elif (not self.lot_pair_seen and now - self.stage_since
+                    >= self.get_parameter(p + 'pair_wait_s').value):
+                why = 'no yellow pair after the arc'
+            if why is not None:
+                self.hold_heading_deg = self.get_parameter(p + 'end_heading_deg').value
+                where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+                self.get_logger().info(
+                    f'{why}, facing {where} - holding {self.hold_heading_deg:+.0f} deg')
+        elif self.hold_heading_deg is None:
             # Lane following, steering by the yellow line, all the way round
             # the turn and into the corridor.
             self.set_avoid(False)
@@ -2501,8 +2684,11 @@ class MissionControl(Node):
         else:
             # Holding it. The corridor is straight and the yellow line is
             # about to end, so there is nothing lane following can add.
-            self.set_avoid(True, angular=self.hold_correction(),
-                           linear=self.get_parameter('lot.speed').value)
+            w = self.hold_correction()
+            v = min(self.get_parameter('lot.speed').value,
+                    self.get_parameter('lot.wheel_max').value
+                    - abs(w) * self.get_parameter('lot.half_track').value)
+            self.set_avoid(True, angular=w, linear=max(v, 0.0))
 
         # Watched the whole time, whoever is steering: detect_lane keeps
         # working out lane_state regardless of who has the wheel.
@@ -2614,6 +2800,17 @@ class MissionControl(Node):
         if waited < self.get_parameter('bay.settle_s').value:
             return
 
+        # ARX: a report from after the robot stopped, not one left over.
+        # detect_obstacle is disarmed through drive_to_lot and only armed
+        # again here, so the last side report can be from the road.
+        if self.side_at is None or self.side_at < self.stage_since:
+            if waited > self.get_parameter('bay.give_up_s').value:
+                self.get_logger().warn(
+                    'no report from detect_obstacle since stopping - it may not '
+                    'be running. Taking the preferred bay unread')
+                self.pick_bay(self.get_parameter('bay.prefer').value,
+                              'nothing was read')
+            return
         if self.side is None:
             if waited > self.get_parameter('bay.give_up_s').value:
                 self.get_logger().warn(
@@ -2720,15 +2917,31 @@ class MissionControl(Node):
         if self.park_phase == 0:
             # On the spot. The column is 0.25 m wide and the robot 0.225 m
             # across its diagonal, so there is no room to turn any other way.
-            self.set_avoid(True, angular=way * self.get_parameter('bay.park.turn_rate').value,
-                           linear=0.0)
-            if self.park_swept() >= self.get_parameter('bay.park.turn_deg').value:
+            rate = self.get_parameter('bay.park.turn_rate').value
+            swept = self.park_swept()
+            if self.get_parameter('bay.park.absolute').value and self.yaw is not None:
+                want = self.get_parameter(f'bay.park.face_{self.bay}_deg').value
+                left = self.heading_off(want, self.yaw) * way
+                slow = self.get_parameter('bay.park.slow_within_deg').value
+                if slow > 0:
+                    rate *= min(1.0, max(abs(left) / slow, 0.25))
+                self.set_avoid(True, angular=way * rate, linear=0.0)
+                # Turned past it, or turned the long way round by more than
+                # half a turn - the heading has been crossed either way.
+                there = left <= 0.0 or swept > 270.0
+            else:
+                self.set_avoid(True, angular=way * rate, linear=0.0)
+                there = swept >= self.get_parameter('bay.park.turn_deg').value
+            if there:
                 self.park_next('reversing into the bay', now)
 
         elif self.park_phase == 1:
-            self.set_avoid(True, angular=0.0, linear=-speed)
+            back = self.get_parameter('bay.park.reverse_speed').value or speed
+            self.set_avoid(True, angular=0.0, linear=-back)
             want = self.get_parameter(
                 f'bay.park.into_{self.bay}_m').value
+            want -= (self.get_parameter('bay.park.reverse_lead_ticks').value
+                     * back / max(self.get_parameter('rate_hz').value, 0.1))
             gone = self.dist_from(self.park_mark)
             if gone is not None and gone >= want:
                 self.park_next(f'parked, {gone:.3f} m in', now)
@@ -2740,10 +2953,25 @@ class MissionControl(Node):
 
         elif self.park_phase == 3:
             radius = self.get_parameter('bay.park.radius_m').value
-            self.set_avoid(True, angular=way * speed / radius, linear=speed)
-            if self.park_swept() >= self.get_parameter('bay.park.turn_deg').value:
+            out = self.get_parameter('bay.park.exit_speed').value or speed
+            out = min(out, self.get_parameter('lot.wheel_max').value
+                      / (1.0 + self.get_parameter('lot.half_track').value / max(radius, 0.01)))
+            w = out / max(radius, 0.01)
+            self.set_avoid(True, angular=way * w, linear=out)
+            swept = self.park_swept()
+            absolute = (self.get_parameter('bay.park.exit_absolute').value
+                        and self.yaw is not None)
+            if absolute:
+                target = self.get_parameter(f'bay.park.exit_heading_{self.bay}_deg').value
+                lead = math.degrees(w) / max(self.get_parameter('rate_hz').value, 0.1) * 0.5
+                there = self.heading_off(target, self.yaw) * way <= lead or swept > 180.0
+            else:
+                there = swept >= self.get_parameter('bay.park.turn_deg').value
+            if there:
                 if self.get_parameter('bay.park.rejoin').value:
-                    self.hold_heading_deg = self.yaw
+                    self.hold_heading_deg = (
+                        self.get_parameter(f'bay.park.exit_heading_{self.bay}_deg').value
+                        if absolute else self.yaw)
                     self.park_next('holding the way out until a line appears', now)
                 else:
                     self.finish_park('out of the bay')
@@ -2752,13 +2980,26 @@ class MissionControl(Node):
         elif self.park_phase == 4:
             # Same P term the approach used, on the heading the arc finished
             # on. There is no line here for another 50 mm or so.
-            self.set_avoid(True, angular=self.hold_correction(), linear=speed)
-            if self.lane_state not in (None, 0):
+            out = self.get_parameter('bay.park.exit_speed').value or speed
+            w = self.hold_correction()
+            out = min(out, self.get_parameter('lot.wheel_max').value
+                      - abs(w) * self.get_parameter('lot.half_track').value)
+            self.set_avoid(True, angular=w, linear=max(out, 0.0))
+            if self.get_parameter('bay.park.exit_absolute').value:
+                # The yellow line on the robot's left, not any yellow: the
+                # lower bay's arc brings the far wall into view first. With
+                # follow_side YELLOW detect_lane reports 1 only for a yellow
+                # line in the left half of the frame (lane.yellow_left_half).
+                self.set_follow_side(FOLLOW_YELLOW)
+                seen = self.lane_state == 1
+            else:
+                seen = self.lane_state not in (None, 0)
+            if seen:
                 self.park_ticks += 1
                 if self.park_ticks >= self.get_parameter('bay.park.rejoin_ticks').value:
                     self.park_next(
-                        f'lane_state {self.lane_state} - following the yellow '
-                        f'line out', now)
+                        f'lane_state {self.lane_state}, yellow {self.yellow_ok} - '
+                        f'following the yellow line out', now)
             else:
                 self.park_ticks = 0
 

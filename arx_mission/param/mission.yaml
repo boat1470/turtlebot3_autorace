@@ -112,7 +112,9 @@
         # on 2026-10-13 - inside the 42 mm margin, lane following pulled it
         # back in 2 s. 0.7 is R 0.20, 80 degrees in 2 s, the rest to the lane.
         rate: 0.7            # rad/s, + is left
-        timeout_s: 2.0
+        # 2.5 on 2026-10-14 (was 2.0): run 1014_2239 timed out at 2.0 with
+        # lane_state 0, stood 0.4 s, and had both lines at 2.45 s.
+        timeout_s: 2.5
         both_ticks: 3
         min_s: 0.5           # do not hand over before this, even with both lines
       # The same for a right arrow, mirrored: the arc turns right. Same
@@ -294,7 +296,9 @@
       white_lost_arc:
         enabled: true
         side: right
-        radius_m: 0.25
+        # 0.22 on 2026-10-14 (was 0.25): run 1014_2304 sat ~7 cm outside the
+        # lane centre round 7A. 0.14 m/s keeps the outer wheel at 0.19.
+        radius_m: 0.22
         speed: 0.14
         back_ticks: 2
         # both: lane_state 2. yellow: 1 or 2 - yellow in view, white or not.
@@ -594,6 +598,32 @@
       # the yellow one (2026-10-12). The sign is remembered once read, so the
       # two need not happen at the same moment.
       both_lines_s: 2.0
+      # Once the sign is read and both lines have held both_lines_s, do not
+      # turn in - carry on, and stop when the yellow line then drops out:
+      # yellow reliability under min_reliability for yellow_lost_ticks ticks.
+      # To see where and why with the robot standing there. Ends the run:
+      # false to score.
+      stop_when_yellow_lost: true
+      yellow_lost_ticks: 3
+      # Instead of stopping there: turn in at 17B. pre_m straight, then a
+      # left arc of radius_m (angular = speed / radius_m) until odom reads
+      # end_heading_deg (-90, facing into the lot), then drive_to_lot.
+      # R 0.25 from the lane centre is the arc round 17B's own centre and
+      # comes out between the two yellow walls. Wins over the stop.
+      left_arc:
+        enabled: true
+        pre_m: 0.0
+        # 0.20 on 2026-10-13 (was 0.25): the arc came out too wide on the course.
+        radius_m: 0.20
+        # 0.14 with R 0.20: outer wheel 0.14 x 1.4 = 0.196, under 0.21
+        speed: 0.14
+        end_heading_deg: -90.0
+        timeout_s: 6.0
+        # then: follow the yellow pair, and lock end_heading_deg once it is
+        # lost for pair_lost_ticks, or if it is not in view pair_wait_s after
+        # the arc
+        pair_lost_ticks: 3
+        pair_wait_s: 1.0
 
       # Reliability counts how much of the frame a line fills and moves by 5
       # a frame, so 50 is about ten frames of having seen it - a second or
@@ -665,7 +695,13 @@
       # whatever it was given last, which is what sent the robot wandering
       # round the pocket and back out the way it came the first time this
       # stage ran without an end.
-      speed: 0.04
+      # 0.21 on 2026-10-13: only used holding a heading now, not steering by
+      # the picture. v is cut while it corrects, so the outer wheel stays
+      # inside wheel_max. Against 0.04 the stop lands ~7 cm further on: the
+      # 3-tick confirm and the stop itself both run longer.
+      speed: 0.21
+      wheel_max: 0.21
+      half_track: 0.08
 
       # Lane-following speed while turning off the road into the lot, until
       # the corridor heading is held; control.max_vel comes back after.
@@ -753,7 +789,9 @@
       # Stand still this long before reading. The robot arrives with its own
       # drift still settling and the scan costs nothing, so there is no
       # reason to act on the first one.
-      settle_s: 1.0
+      # 0 on 2026-10-13: read straight away. It still waits for the first
+      # side report from after the stop, ~0.1-0.3 s with the LiDAR re-armed.
+      settle_s: 0.0
 
       # Which to take when both are empty - which in the simulator is every
       # run that does not use blocked:=. Right, like the example, which
@@ -787,17 +825,44 @@
         # On the spot for the first turn. The column is 0.25 m wide and the
         # robot 0.225 m across its diagonal, so there is no room for an arc.
         turn_deg: 90.0
-        turn_rate: 0.6
+        # 1.5 on 2026-10-13 (was 0.6); slow_within_deg eases the end of it.
+        turn_rate: 1.5
+        # Phase 0 turns to an odom heading instead of through turn_deg:
+        # tail to the bay, robot stopped facing -90 down the lot. Facing up
+        # (180) backs into its left bay, facing down (0) into its right.
+        absolute: true
+        face_left_deg: 180.0
+        face_right_deg: -5.0
+        slow_within_deg: 20.0
 
         speed: 0.04
+        # The reverse into the bay (0 = speed). 0.15 on 2026-10-13: the bay is
+        # 0.15-0.22 m deep, ~1.5 s. Ended reverse_lead_ticks of travel early
+        # (22 mm at 0.15) - odometry is a tick behind the command. If it
+        # stops short of into_*_m, lower this; if it overruns, raise it.
+        reverse_speed: 0.15
+        reverse_lead_ticks: 1.5
+        # The way out, 2026-10-13. exit_speed for the arc and the straight
+        # (0 = speed); the arc is cut to keep the outer wheel inside
+        # lot.wheel_max, 0.15 at R 0.248. exit_absolute: the arc ends on
+        # odom exit_heading_<bay>_deg (+90, facing the way out) and the straight
+        # holds it until the yellow line on the robot's LEFT is in view -
+        # lane_state 1 with follow_side YELLOW, for rejoin_ticks - then follows
+        # it. Not any yellow: out of the lower bay the far wall shows first.
+        exit_speed: 0.21
+        exit_absolute: true
+        # One per bay - the left bay's arc comes round from 180, the right
+        # bay's from 0. Where the arc ends and the heading the straight holds.
+        exit_heading_left_deg: 95.0    # 2026-10-13 (was 90)
+        exit_heading_right_deg: 85.0
 
         # Two distances, not one, because the robot does not stop in the
         # middle of the column: it stops at x 0.476 against a middle of
         # 0.506, four runs agreeing to 3.5 mm. The bay centres at x 0.754 and
         # x 0.258 are therefore 0.278 and 0.218 away. A single figure would
         # leave 4 mm at one end of a bay with only 68 mm to give.
-        into_left_m: 0.278
-        into_right_m: 0.218
+        into_left_m: 0.20      # 2026-10-13, on the real course (0.278 was the simulator)
+        into_right_m: 0.22     # 2026-10-13, on the real course (0.218 was the simulator)
 
         # Stand still in the bay. Zero is what was asked for; the knob is
         # here because being seen stopped in it may be what actually scores.
