@@ -120,6 +120,13 @@
       # mode. 40 px is about 27 mm at 1.49 px/mm.
       white_gate: true
       white_gate_margin_px: 40
+      # Steering by the yellow line alone (follow_side YELLOW - leaving the
+      # parking bay; not the yellow pair, which takes either wall), the
+      # left yellow fit has to end in the left half of the frame, or it is
+      # searched for afresh there and dropped if that finds nothing. 2026-10-14:
+      # out of the lower bay the far wall came into view first and the fit
+      # tracked onto it.
+      yellow_left_half: true
       # 480 เดินดีอยู่นะ
       # Left at the original's 2-in-3 drop. /camera/image_projected runs at
       # 8.78 Hz measured, so this is what puts /detect/lane at ~2.9 Hz, and

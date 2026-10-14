@@ -139,6 +139,15 @@ class DetectLane(Node):
                 # white fit locked onto in the 8A turn and then followed.
                 ('lane.white_gate', True),
                 ('lane.white_gate_margin_px', 40),
+                # ARX: while steering by the yellow line alone (FOLLOW_YELLOW -
+                # not the yellow pair, which takes a wall on either side) the
+                # line followed is the left one, so a fit whose bottom lies
+                # right of the image's middle is the other yellow. Leaving the
+                # lower parking bay the arc swings the far wall into view first
+                # and the fit, searching near its last curve, stayed on it. It
+                # is searched for again from the left half, and dropped - no
+                # left line at all - if that finds nothing left of the middle.
+                ('lane.yellow_left_half', True),
                 ('lane.frame_skip', 3),
                 ('lane.publish_debug_image', False),
                 ('lane.auto_adjust_white', True),
@@ -288,6 +297,11 @@ class DetectLane(Node):
         self.right_yellow_fitx = None
         self.last_image_stamp = None
 
+    def forget_left_yellow(self):
+        """Drop the left (yellow) fit and its fallback, so the next is fresh (ARX)."""
+        self.left_fit = self.left_fitx = None
+        self.lane_fit_bef['left'] = None
+
     def cbFollowSide(self, msg):
         """Latch which line to steer by (ARX)."""
         if msg.data == self.follow_side:
@@ -295,6 +309,11 @@ class DetectLane(Node):
         if self.follow_side == FOLLOW_YELLOW_PAIR:
             self.right_yellow_fit = self.right_yellow_fitx = None
             self.lane_fit_bef['right_yellow'] = None
+        # ARX: into FOLLOW_YELLOW, start the left yellow afresh from the left
+        # half, rather than carry on a fit tracked while the robot was turning
+        # - which may by now be on the other wall.
+        if msg.data == FOLLOW_YELLOW:
+            self.forget_left_yellow()
         self.follow_side = msg.data
         self.get_logger().info(
             'steering by the mean of both lines' if msg.data == FOLLOW_AUTO
@@ -573,6 +592,18 @@ class DetectLane(Node):
 
         if lane_fitx is None:
             lane_fitx, lane_fit = self.sliding_windown(image, left_or_right)
+
+        # ARX: see lane.yellow_left_half.
+        if (left_or_right == 'left' and lane_fitx is not None
+                and self.follow_side == FOLLOW_YELLOW
+                and self.get_parameter('lane.yellow_left_half').value):
+            mid = image.shape[1] / 2
+            if lane_fitx[-1] > mid and extend:
+                extend = False
+                lane_fitx, lane_fit = self.sliding_windown(image, 'left')
+            if lane_fitx is None or lane_fitx[-1] > mid:
+                self.forget_left_yellow()
+                return
 
         if lane_fitx is None:
             return

@@ -249,9 +249,14 @@ class ControlLane(Node):
         # curve that is still ahead of the steering row already slows the
         # robot down.
         speed_error = abs(error)
+        # Not a centre off the picture, though: a short fit stretched to the
+        # ahead row can land thousands of pixels out - +4434 at the end of
+        # the lot's yellow walls in run 1014_2251, which cut v to 0 and left
+        # it there, the next frames having no lane to replace it.
         if (self.get_parameter('control.speed_from_ahead').value
                 and self.ahead_time is not None
-                and now - self.ahead_time <= self.get_parameter('control.ahead_max_age_s').value):
+                and now - self.ahead_time <= self.get_parameter('control.ahead_max_age_s').value
+                and abs(self.ahead_error) <= 500):
             speed_error = max(speed_error, abs(self.ahead_error))
 
         twist = Twist()
