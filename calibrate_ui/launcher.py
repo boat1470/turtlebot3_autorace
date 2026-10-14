@@ -293,19 +293,27 @@ class Window:
         self.mission = Job('run', 'full.launch', MISSION_CMD.format(self.preset.get()), self.out)
         self.jobs.append(self.mission)
         box = group('mission  (this PC)', [self.mission])
+        # The one button a run is started from, so it is the big one: green
+        # to start, red to stop, the preset on it, and key 2 does the same.
+        self.mission_button = tk.Button(
+            box, height=2, width=26, font=('TkDefaultFont', 14, 'bold'),
+            fg='white', activeforeground='white', command=self.toggle_mission)
+        self.mission_button.grid(row=0, column=0, columnspan=5, sticky='we', pady=(0, 6))
+        root.bind('2', lambda e: self.toggle_mission())
+        tk.Label(box, text='preset').grid(row=1, column=0, sticky='w')
         ttk.Combobox(box, textvariable=self.preset, values=names, state='readonly',
-                     width=12).grid(row=0, column=1, padx=8, sticky='w')
-        b = tk.Button(box, text='start', width=7, command=self.toggle_mission)
-        b.grid(row=0, column=0, pady=2, sticky='w')
+                     width=12, font=('TkDefaultFont', 12, 'bold')
+                     ).grid(row=1, column=1, padx=8, sticky='w')
         led = tk.Label(box, text='\u25cf', fg='#777', font=('TkDefaultFont', 14))
-        led.grid(row=0, column=2, sticky='w')
+        led.grid(row=1, column=2, sticky='w')
         st = tk.Label(box, text='stopped', width=12, anchor='w', fg='#777')
-        st.grid(row=0, column=3, sticky='w')
+        st.grid(row=1, column=3, sticky='w')
         self.mission_cmd = ttk.Label(box, text=self.mission.shown, foreground='#777')
-        self.mission_cmd.grid(row=0, column=4, padx=8, sticky='w')
+        self.mission_cmd.grid(row=1, column=4, padx=8, sticky='w')
         self.preset.trace_add('write', lambda *a: self.pick_preset())
-        self.rows.append((self.mission, b, st, led))
+        self.rows.append((self.mission, None, st, led))
         self.mission_pending = False
+        self.paint_mission_button()
 
         bar = ttk.Frame(root, padding=(8, 6, 8, 4))
         bar.pack(fill='x')
@@ -323,6 +331,21 @@ class Window:
         scroll.pack(side='right', fill='y')
 
         root.after(100, self.tick)
+
+    def paint_mission_button(self):
+        """Green START with the preset on it, or red STOP while it runs."""
+        if self.mission.running():
+            self.mission_button.config(
+                text=f'\u25a0  2  STOP  {self.preset.get()}',
+                bg='#c0392b', activebackground='#e74c3c')
+        elif self.mission_pending:
+            self.mission_button.config(
+                text=f'\u2026  stopping calibration first',
+                bg='#b7950b', activebackground='#d4ac0d')
+        else:
+            self.mission_button.config(
+                text=f'\u25b6  2  START  {self.preset.get()}',
+                bg='#1e8449', activebackground='#27ae60')
 
     def pick_preset(self):
         """Point the mission job at the chosen preset - not while it runs."""
@@ -385,7 +408,9 @@ class Window:
             text, colour = job.status()
             s.config(text=text, fg=colour)
             led.config(fg=colour)
-            b.config(text='stop' if job.running() else 'start')
+            if b is not None:
+                b.config(text='stop' if job.running() else 'start')
+        self.paint_mission_button()
         if self.all_button is not None:
             self.all_button.config(
                 text='1  stop all' if any(j.running() for j in self.calib)

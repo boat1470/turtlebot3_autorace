@@ -47,6 +47,11 @@ echo` terminals and an rqt_image_view:
                  front - the robot's own left and right
     batt         a small button: reads /battery_state once and shows voltage
                  and percent as of that press. It does not update by itself
+    REC          records a run: `ros2 bag record` of RECORD_TOPICS into
+                 ~/runs/<month-day_hour-minute>/, red with the time while it
+                 runs, press again (or close the window) to stop. The box
+                 beside it adds a line to ~/runs/notes.txt about the last run,
+                 with the folder name and how far into it the note was taken
 
 Topic names are the ones detect_lane.launch.py remaps to. A value turns grey
 with "stale" when nothing has arrived for a second.
@@ -55,6 +60,9 @@ with "stale" when nothing has arrived for a second.
 import argparse
 import collections
 import math
+import os
+import signal
+import subprocess
 import threading
 import time
 
@@ -190,6 +198,67 @@ class Listener(Node):
                     self.frame, self.frame_stamp)
 
 
+RUNS = os.path.expanduser('~/runs')
+# What a run is recorded with - see notes/CLAUDE.md, "Recording a real-robot
+# run". /rosout carries every node's log, stage changes included.
+RECORD_TOPICS = (
+    '/detect/image_lane/compressed', '/detect/image_yellow_lane_marker/compressed',
+    '/detect/image_white_lane_marker/compressed',
+    '/detect/lane', '/detect/lane_ahead', '/detect/lane_state',
+    '/detect/yellow_line_reliability', '/detect/white_line_reliability',
+    '/detect/traffic_sign', '/detect/obstacle', '/detect/obstacle_side',
+    '/detect/front_range', '/arx/armed_mission', '/cmd_vel', '/odom', '/scan',
+    '/rosout',
+)
+
+
+class Recorder:
+    """`ros2 bag record` in its own process group, so Ctrl+C reaches all of it."""
+
+    def __init__(self):
+        self.proc = None
+        self.name = None        # folder of the run being or last recorded
+        self.since = None
+
+    def running(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def start(self):
+        os.makedirs(RUNS, exist_ok=True)
+        name = time.strftime('%m%d_%H%M')
+        # Two runs in the same minute: the bag refuses a folder that exists.
+        base, n = name, 2
+        while os.path.exists(os.path.join(RUNS, name)):
+            name, n = f'{base}_{n}', n + 1
+        log = open(os.path.join(RUNS, name + '.record.log'), 'w')
+        self.proc = subprocess.Popen(
+            ['ros2', 'bag', 'record', '-o', os.path.join(RUNS, name), *RECORD_TOPICS],
+            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        self.name, self.since = name, time.monotonic()
+
+    def stop(self, wait=6.0):
+        """SIGINT, as Ctrl+C would - the bag closes its file on it."""
+        if not self.running():
+            return
+        try:
+            os.killpg(self.proc.pid, signal.SIGINT)
+            self.proc.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            os.killpg(self.proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    def note(self, text):
+        """A line in ~/runs/notes.txt: folder, time into the run, the text."""
+        os.makedirs(RUNS, exist_ok=True)
+        at = ''
+        if self.since is not None and self.running():
+            t = int(time.monotonic() - self.since)
+            at = f'  (~{t // 60}:{t % 60:02d})'
+        with open(os.path.join(RUNS, 'notes.txt'), 'a') as f:
+            f.write(f'{self.name or "-"}{at}  {text}\n')
+
+
 class Window:
 
     def __init__(self, node, with_image, target):
@@ -228,14 +297,21 @@ class Window:
             pick = ttk.Frame(left, style='Dark.TFrame')
             pick.pack(fill='x', pady=(6, 0))
             self.which = tk.StringVar(value=IMAGES[0][1])
-            for name, topic in IMAGES:
+            for i, (name, topic) in enumerate(IMAGES):
                 rb = tk.Radiobutton(pick, text=name, value=topic, variable=self.which,
                                     command=self.switch, indicatoron=False, width=10,
                                     bg='#2a2a2a', fg=fg, selectcolor='#3a5a8a',
                                     activebackground='#3a3a3a', activeforeground=fg)
-                rb.pack(side='left', padx=(0, 4))
+                rb.grid(row=0, column=i, padx=(0, 4))
                 if topic == OBSTACLE_IMAGE:
                     self.obst_tab = rb
+                if topic == SIGN_IMAGE:
+                    # The last sign detect_sign reported, under its button,
+                    # whichever image is being looked at.
+                    self.sign_tab_text = tk.Label(
+                        pick, text='-', bg='#1b1b1b', fg='#777', width=12,
+                        font=('DejaVu Sans Mono', 9, 'bold'))
+                    self.sign_tab_text.grid(row=1, column=i, padx=(0, 4), pady=(2, 0))
             self.img_info = tk.StringVar(value='')
             label(left, textvariable=self.img_info, fg=dim, anchor='w',
                   justify='left').pack(fill='x', pady=(4, 0))
@@ -243,6 +319,26 @@ class Window:
 
         right = ttk.Frame(root, style='Dark.TFrame', padding=8)
         right.grid(row=0, column=col, sticky='n')
+
+        # Record a run: one button, and a box for a line in ~/runs/notes.txt.
+        self.rec = Recorder()
+        rec = ttk.Frame(right, style='Dark.TFrame')
+        rec.pack(fill='x', pady=(0, 8))
+        self.rec_button = tk.Button(rec, width=16, font=('TkDefaultFont', 11, 'bold'),
+                                    fg='white', activeforeground='white',
+                                    command=self.toggle_record)
+        self.rec_button.pack(side='left')
+        self.rec_note = tk.Entry(rec, width=24, bg='#2a2a2a', fg=fg,
+                                 insertbackground=fg)
+        self.rec_note.pack(side='left', padx=(8, 4), fill='x', expand=True)
+        self.rec_note.bind('<Return>', lambda e: self.add_note())
+        tk.Button(rec, text='note', command=self.add_note, padx=4, pady=0,
+                  bg='#2a2a2a', fg=fg, activebackground='#3a3a3a',
+                  activeforeground=fg).pack(side='left')
+        self.rec_text = label(right, text='', font=mono, fg=dim, anchor='w')
+        self.rec_text.pack(fill='x')
+        root.protocol('WM_DELETE_WINDOW', self.close)
+        self.paint_record()
 
         # Which mission is armed, and the last sign detect_sign reported. It
         # only reports a sign it matched, so this is the latest hit and how
@@ -342,6 +438,45 @@ class Window:
         self.batt_text.pack(side='right', padx=(0, 6))
 
         root.after(100, self.tick)
+
+    def toggle_record(self):
+        if self.rec.running():
+            self.rec_text.config(text='stopping - closing the bag ...')
+            self.root.update_idletasks()
+            self.rec.stop()
+            self.rec_text.config(text=f'saved ~/runs/{self.rec.name}')
+        else:
+            try:
+                self.rec.start()
+                self.rec_text.config(text=f'recording to ~/runs/{self.rec.name}')
+            except OSError as e:
+                self.rec_text.config(text=f'could not start: {e}')
+        self.paint_record()
+
+    def paint_record(self):
+        if self.rec.running():
+            t = int(time.monotonic() - self.rec.since)
+            self.rec_button.config(text=f'\u25a0 STOP  {t // 60}:{t % 60:02d}',
+                                   bg='#c0392b', activebackground='#e74c3c')
+        else:
+            self.rec_button.config(text='\u25cf REC', bg='#7b241c',
+                                   activebackground='#a93226')
+            if self.rec.proc is not None and self.rec.proc.poll() not in (None, 0, -2, 130):
+                self.rec_text.config(
+                    text=f'ros2 bag stopped by itself - see ~/runs/{self.rec.name}.record.log')
+
+    def add_note(self):
+        text = self.rec_note.get().strip()
+        if not text:
+            return
+        self.rec.note(text)
+        self.rec_note.delete(0, 'end')
+        self.rec_text.config(text=f'noted for {self.rec.name or "-"}: {text}')
+
+    def close(self):
+        """Close the bag properly before the window goes."""
+        self.rec.stop()
+        self.root.destroy()
 
     def switch(self):
         if rclpy.ok():
@@ -489,6 +624,14 @@ class Window:
             sign = f'{SIGNS.get(v[0], str(v[0]))} ({v[0]})  {age:.1f} s ago'
             colour = '#30b050' if age < 1.0 else '#e8e8e8' if age < 5.0 else '#777'
         self.sign_text.config(text=f'armed: {armed}\nsign:  {sign}', fg=colour)
+        under = getattr(self, 'sign_tab_text', None)
+        if under is not None:
+            if v is None:
+                under.config(text='-', fg='#777')
+            else:
+                # Short, so the label stays the width of the button above it.
+                name = {1: 'CONSTR'}.get(v[0], SIGNS.get(v[0], str(v[0])))
+                under.config(text=f'{name} {age:.0f}s', fg=colour)
 
         # obstacle
         b, b_stale = get('/detect/obstacle')
@@ -535,6 +678,7 @@ class Window:
                     else 'no mask - lane.publish_debug_image: true\n'
                          'in lane.yaml, then restart detect_lane')
 
+        self.paint_record()
         self.root.after(100, self.tick)
 
     def draw_plot(self, errors, now):
