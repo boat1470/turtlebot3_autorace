@@ -120,8 +120,18 @@ PRESETS = {
     #
     # It is the first preset that needs a heading of its own. Everything up
     # to here has been driven in +x.
+    #
+    # ARX 2026-10-15: starts at parking_17b now, not drive_to_lot - that is
+    # drive_to_parking with the parking sign taken as read and both lines as
+    # held, so the run begins waiting for the yellow line to drop out, then
+    # arcs into the lot at 17B -> yellow pair -> hold -90 -> bays. drive_to_lot
+    # on its own runs the old lane-following way in. On the robot: stand it on
+    # the up-lane 20-30 cm before 17B with both lines in view, facing up the
+    # map, and start the bringup THERE - odom's zero is the bringup heading,
+    # and this preset adds 180 to it. For the sign and the 2 s hold as well,
+    # use 'drive_to_parking' and stand it before the parking sign.
     'mission4': {
-        'stage': 'drive_to_lot',
+        'stage': 'parking_17b',
         'x': '1.28',
         'y': '1.745',
         'yaw': '180.0',

@@ -126,7 +126,13 @@ STAGE_STOPPED = 'stopped'
 # Every stage `start_stage` will accept (ARX). Written out rather than
 # collected from the constants above so that adding a stage without deciding
 # whether a run may start in it is a deliberate act.
+# ARX: not a stage of its own - a start_stage that becomes drive_to_parking
+# with the parking sign taken as read and both lines as held, so the run
+# begins at "waiting for the yellow line to drop out" before 17B.
+START_PARKING_17B = 'parking_17b'
+
 STAGES = frozenset({
+    START_PARKING_17B,
     STAGE_WAIT_GREEN,
     STAGE_DRIVE_TO_SIGN,
     STAGE_TURN,
@@ -1100,6 +1106,10 @@ class MissionControl(Node):
         self.yellow_lost_ticks = 0      # ARX: for parking.stop_when_yellow_lost
         self.parking_both_held = False
         self.park_arc_phase = None       # ARX: parking.left_arc - 0 straight, 1 arc
+        # ARX: start_stage parking_17b - see START_PARKING_17B.
+        self.parking_from_17b = self.stage == START_PARKING_17B
+        if self.parking_from_17b:
+            self.stage = STAGE_DRIVE_TO_PARKING
         self.lot_from_arc = False
         self.lot_pair_lost = 0
         self.wl_arc_since = None        # ARX: white_lost_arc running since
@@ -2414,6 +2424,16 @@ class MissionControl(Node):
         if self.park_arc_phase is not None:
             self.tick_parking_left_arc(now)
             return
+        # ARX: started at parking_17b. Once both lines are actually in view
+        # - so a robot stood where there is no yellow does not count that as
+        # the yellow dropping out - take the sign as read and the hold as done.
+        if self.parking_from_17b and self.both_lines():
+            self.parking_from_17b = False
+            self.parking_sign_at = now
+            self.parking_both_held = True
+            self.get_logger().info(
+                'started at parking_17b: sign and both lines taken as done - '
+                'watching for the yellow line to drop out')
         self.set_driving(True)
         self.sign_hunt_speed()
         self.set_avoid(False)
