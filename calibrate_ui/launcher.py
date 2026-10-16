@@ -40,6 +40,19 @@ On the Pi, each runs as `ssh -tt <host> bash -ic '<command>'`:
   is sent on the Pi for the launch file by name, and the connection is
   closed five seconds after that. ssh has to log in without a password
   (BatchMode): set up a key with ssh-copy-id first.
+
+sign board  the junction sign is an ESP32 with two arms, its own MQTT
+            broker at --mqtt-host (192.168.0.102:1883). Pick left or right
+            and a delay; with active on, every START of full.launch sends
+            `down` at once and the chosen side once the delay is up. Turning
+            active on sends `down` too. The board is asked for its state
+            every 10 s. A command that cannot go out is said so in red -
+            never dropped quietly.
+
+                topic             way           payload
+                /control/sign     PC -> board   left / right / down
+                /cmd/state        PC -> board   anything = "what are you?"
+                /response/state   board -> PC   left / right / none
 """
 
 import argparse
@@ -48,6 +61,7 @@ import os
 import re
 import shlex
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -233,9 +247,112 @@ class RemoteJob(Job):
             self.pkill_sent = now + 3600    # once
 
 
+class SignBoard:
+    """The ESP32 sign, over MQTT (paho 1.x). Callbacks only set attributes.
+
+    paho runs in its own thread and reconnects by itself; the window reads
+    `state()` on its tick, so nothing here touches Tk.
+    """
+
+    SIGN, ASK, ANSWER = '/control/sign', '/cmd/state', '/response/state'
+
+    def __init__(self, host, port, out):
+        self.host, self.port, self.out = host, port, out
+        self.connected = False
+        self.problem = 'connecting ...'     # why not connected, for the label
+        self.since = time.monotonic()       # when connected / problem began
+        self.answer = None                  # (word, monotonic)
+        self.asked = None                   # monotonic of the last /cmd/state
+        self.client = None
+        try:
+            import paho.mqtt.client as mqtt
+        except ImportError:
+            self.problem = 'paho-mqtt is not installed (pip install paho-mqtt)'
+            self.say(self.problem)
+            return
+        c = self.client = mqtt.Client(client_id=f'arx-launcher-{os.getpid()}')
+        c.on_connect = self.on_connect
+        c.on_disconnect = self.on_disconnect
+        c.on_message = self.on_message
+        c.reconnect_delay_set(min_delay=1, max_delay=5)
+        c.connect_async(host, port, keepalive=10)
+        c.loop_start()
+        threading.Thread(target=self.watch_first, daemon=True).start()
+
+    def say(self, text):
+        self.out.append(f'[sign] {text}')
+
+    def where(self):
+        return f'{self.host}:{self.port}'
+
+    def watch_first(self):
+        """Not connected after 5 s: find out why, in words."""
+        time.sleep(5.0)
+        if self.connected:
+            return
+        try:
+            socket.create_connection((self.host, self.port), timeout=2.0).close()
+            why = 'the port answers but MQTT did not connect'
+        except ConnectionRefusedError:
+            why = 'connection refused - nothing listening on that port'
+        except socket.timeout:
+            why = 'no answer - board off, or not on this network?'
+        except OSError as e:
+            why = f'{e.strerror or e}'
+        self.problem = f'cannot connect to {self.where()} - {why}'
+        self.since = time.monotonic()
+        self.say(self.problem)
+
+    def on_connect(self, client, userdata, flags, rc):
+        if rc != 0:
+            self.connected = False
+            self.problem = f'cannot connect to {self.where()} - broker refused (rc {rc})'
+            self.since = time.monotonic()
+            self.say(self.problem)
+            return
+        self.connected = True
+        self.problem = None
+        self.since = time.monotonic()
+        client.subscribe(self.ANSWER)
+        self.say(f'connected to {self.where()}')
+
+    def on_disconnect(self, client, userdata, rc):
+        if self.connected:
+            self.say(f'lost the connection to {self.where()} (rc {rc}) - retrying')
+        self.connected = False
+        self.problem = f'lost connection to {self.where()} at {time.strftime("%H:%M:%S")} - retrying'
+        self.since = time.monotonic()
+
+    def on_message(self, client, userdata, msg):
+        word = msg.payload.decode(errors='replace').strip().lower()
+        self.answer = (word, time.monotonic())
+
+    def send(self, word):
+        """Publish to /control/sign. Returns whether it went; says so if not."""
+        if self.client is None or not self.connected:
+            self.say(f'NOT SENT: {word} - not connected to the board ({self.where()})')
+            return False
+        info = self.client.publish(self.SIGN, word)
+        if info.rc != 0:
+            self.say(f'NOT SENT: {word} - publish failed (rc {info.rc})')
+            return False
+        self.say(f'sent {self.SIGN} {word}')
+        return True
+
+    def ask(self):
+        if self.client is not None and self.connected:
+            self.asked = time.monotonic()
+            self.client.publish(self.ASK, '?')
+
+    def close(self):
+        if self.client is not None:
+            self.client.loop_stop()
+            self.client.disconnect()
+
+
 class Window:
 
-    def __init__(self, commands=COMMANDS):
+    def __init__(self, commands=COMMANDS, mqtt_host='192.168.0.102', mqtt_port=1883):
         import tkinter as tk
         from tkinter import ttk
         self.out = collections.deque()   # lines from the pump threads
@@ -284,6 +401,34 @@ class Window:
             for i, job in enumerate(self.calib):
                 row(box, i + 1, job)
             root.bind('1', lambda e: self.toggle_calib())
+
+        # The junction sign on the ESP32 - see SignBoard and the docstring.
+        self.sign = SignBoard(mqtt_host, mqtt_port, self.out)
+        self.sign_side = tk.StringVar(value='left')
+        self.sign_delay = tk.StringVar(value='5')
+        self.sign_active = False
+        self.sign_due = None          # (monotonic, side) of the pending send
+        self.sign_down_ok = True      # whether the last `down` went out
+        self.sign_sent = ''           # what the countdown line last said
+        self.sign_next_ask = time.monotonic() + 2.0
+        box = group(f'sign board  (ESP32 MQTT {mqtt_host})', [])
+        self.sign_led = tk.Label(box, text='\u25cf', fg='#d4ac0d', font=('TkDefaultFont', 14))
+        self.sign_led.grid(row=0, column=0, sticky='w')
+        ttk.Combobox(box, textvariable=self.sign_side, values=('left', 'right'),
+                     state='readonly', width=6).grid(row=0, column=1, padx=4)
+        tk.Label(box, text='after').grid(row=0, column=2)
+        ttk.Combobox(box, textvariable=self.sign_delay,
+                     values=('0', '1', '2', '3', '5', '8', '10', '15', '20', '30'),
+                     state='readonly', width=4).grid(row=0, column=3, padx=4)
+        tk.Label(box, text='s').grid(row=0, column=4, sticky='w')
+        self.sign_button = tk.Button(box, width=12, font=('TkDefaultFont', 11, 'bold'),
+                                     command=self.toggle_sign)
+        self.sign_button.grid(row=0, column=5, padx=8)
+        self.sign_link = tk.Label(box, text='', anchor='w')
+        self.sign_link.grid(row=1, column=0, columnspan=8, sticky='w')
+        self.sign_line = tk.Label(box, text='', anchor='w', fg='#555')
+        self.sign_line.grid(row=2, column=0, columnspan=8, sticky='w')
+        self.paint_sign()
 
         # The full stack, from a chosen preset. It starts its own camera
         # pipeline (intrinsic and extrinsic), so starting it stops the
@@ -370,7 +515,73 @@ class Window:
                             'full.launch starts its own camera pipeline')
             self.mission_pending = True
             return
+        self.start_mission()
+
+    def start_mission(self):
+        """full.launch, and with the sign board active: down now, the side later."""
         self.mission.start()
+        if self.sign_active:
+            self.sign_down_ok = self.sign.send('down')
+            delay = float(self.sign_delay.get())
+            self.sign_due = (time.monotonic() + delay, self.sign_side.get())
+            self.sign_sent = ''
+
+    def toggle_sign(self):
+        self.sign_active = not self.sign_active
+        if self.sign_active:
+            self.sign_down_ok = self.sign.send('down')
+        self.sign_due = None
+        self.sign_sent = ''
+        self.paint_sign()
+
+    def paint_sign(self):
+        """LED, connection line, button and countdown - from tick."""
+        b = self.sign
+        if b.connected:
+            self.sign_led.config(fg='#1e8449')
+            if b.answer is None:
+                ans = 'board: no answer yet'
+            else:
+                ans = f'board: {b.answer[0]}  ({time.monotonic() - b.answer[1]:.0f} s ago)'
+            if (b.asked is not None and time.monotonic() - b.asked > 3.0
+                    and (b.answer is None or b.answer[1] < b.asked)):
+                ans += '   - board did not answer /cmd/state'
+            self.sign_link.config(text=f'connected to {b.where()}   {ans}', fg='#1e8449')
+        else:
+            starting = b.problem == 'connecting ...'
+            self.sign_led.config(fg='#d4ac0d' if starting else '#c0392b')
+            self.sign_link.config(text=b.problem, fg='#9a7d0a' if starting else '#c0392b')
+        if self.sign_active:
+            self.sign_button.config(text='\u25cf ACTIVE', bg='#1e8449', fg='white',
+                                    activebackground='#27ae60', activeforeground='white')
+        else:
+            self.sign_button.config(text='active', bg='#d5d8dc', fg='black',
+                                    activebackground='#e5e7e9', activeforeground='black')
+        if self.sign_due is not None:
+            left = self.sign_due[0] - time.monotonic()
+            down = '' if self.sign_down_ok else 'down NOT SENT (not connected) - '
+            self.sign_line.config(text=f'{down}sending {self.sign_due[1]} in {max(left, 0):.0f} s',
+                                  fg='#c0392b' if down else '#555')
+        else:
+            self.sign_line.config(text=self.sign_sent,
+                                  fg='#c0392b' if self.sign_sent.startswith('NOT') else '#555')
+
+    def tick_sign(self):
+        now = time.monotonic()
+        if self.sign_due is not None:
+            if not self.mission.running():
+                self.sign_due = None
+                self.sign_sent = 'full.launch stopped before the delay - nothing sent'
+            elif now >= self.sign_due[0]:
+                side = self.sign_due[1]
+                self.sign_due = None
+                self.sign_sent = (f'sent {side} at {time.strftime("%H:%M:%S")}'
+                                  if self.sign.send(side)
+                                  else f'NOT SENT: {side} - not connected to the board')
+        if now >= self.sign_next_ask:
+            self.sign_next_ask = now + 10.0
+            self.sign.ask()
+        self.paint_sign()
 
     def toggle(self, job):
         if job.running():
@@ -393,7 +604,8 @@ class Window:
     def tick(self):
         if self.mission_pending and not any(j.running() for j in self.calib):
             self.mission_pending = False
-            self.mission.start()
+            self.start_mission()
+        self.tick_sign()
         if self.out:
             at_end = self.log.yview()[1] > 0.999
             while self.out:
@@ -430,6 +642,7 @@ class Window:
         for job in self.jobs:
             if job.running():
                 job.signal(signal.SIGKILL)
+        self.sign.close()
         self.root.destroy()
 
     def run(self):
@@ -442,9 +655,12 @@ class Window:
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('--host', default=HOST, help=f'ssh target for the Pi (default {HOST})')
+    ap.add_argument('--mqtt-host', default='192.168.0.102',
+                    help='the sign board\'s MQTT broker (default 192.168.0.102)')
+    ap.add_argument('--mqtt-port', type=int, default=1883)
     args = ap.parse_args()
     RemoteJob.host = args.host
-    Window().run()
+    Window(mqtt_host=args.mqtt_host, mqtt_port=args.mqtt_port).run()
 
 
 if __name__ == '__main__':
