@@ -604,7 +604,9 @@
       # To see where and why with the robot standing there. Ends the run:
       # false to score.
       stop_when_yellow_lost: true
-      yellow_lost_ticks: 3
+      # 2026-10-18: 2 (was 3). Run 1018_1756 took 1.1 s for yellow to drop
+      # out against 0.6-0.7 s in the others, and turned in ~7 cm late.
+      yellow_lost_ticks: 2
       # Instead of stopping there: turn in at 17B. pre_m straight, then a
       # left arc of radius_m (angular = speed / radius_m) until odom reads
       # end_heading_deg (-90, facing into the lot), then drive_to_lot.

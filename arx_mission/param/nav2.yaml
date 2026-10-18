@@ -182,7 +182,13 @@ controller_server:
       inflation_cost_scaling_factor: 5.0    # ARX: was 3.0 - match costmap inflation_layer
 
       # ── Collision detection ──
-      use_collision_detection: true
+      # ARX 2026-10-18: off. RPP stopped on "collision ahead" in the narrowest
+      # bit before the exit - 0.145 m from the centre to the wall, 5 cm a side
+      # for the wheels - three runs out of seven, about a second short of the
+      # goal, while collision_monitor (which does stop for a real one) never
+      # fired. collision_monitor is the guard now: PolygonStop at 0.08 m and
+      # FootprintApproach over 0.6 s. Back to true if the robot ever touches.
+      use_collision_detection: false
       # ARX: was 1.0. RPP lays the footprint along the arc to the carrot for
       # this long and stops if it touches anything; pure pursuit's arc cuts
       # the inside of every bend, so in the tunnel it touched the corner of a
