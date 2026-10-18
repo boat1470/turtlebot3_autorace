@@ -43,11 +43,19 @@ the next piece of work, not this one.
 from collections import deque
 import math
 
+from action_msgs.msg import GoalStatus
+from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from geometry_msgs.msg import Twist
+from nav2_msgs.action import NavigateToPose
+from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import Odometry
 import rclpy
+from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.time import Time
 from std_msgs.msg import Bool, Float32, Float64, UInt8
+from tf2_ros import Buffer, TransformListener
 
 # /arx/traffic_light - must match detect_traffic_light.py
 LIGHT_UNKNOWN = 0
@@ -117,6 +125,7 @@ STAGE_DRIVE_TO_LEVEL = 'drive_to_level'
 STAGE_APPROACH_BAR = 'approach_bar'
 STAGE_WAIT_BAR = 'wait_bar'
 STAGE_DRIVE_TO_TUNNEL = 'drive_to_tunnel'
+STAGE_TUNNEL_NAV = 'tunnel_nav'
 
 # /detect/lane_state, from detect_lane: which line it is steering by.
 LANE_STATE_FOR_SIDE = {FOLLOW_YELLOW: 1, FOLLOW_WHITE: 3}
@@ -149,6 +158,7 @@ STAGES = frozenset({
     STAGE_APPROACH_BAR,
     STAGE_WAIT_BAR,
     STAGE_DRIVE_TO_TUNNEL,
+    STAGE_TUNNEL_NAV,
     STAGE_STOPPED,
 })
 
@@ -969,6 +979,44 @@ class MissionControl(Node):
         self.declare_parameter('tunnel.stop_after_entry', True)
         self.declare_parameter('tunnel.give_up_s', 120.0)
 
+        # Through the tunnel on Nav2, from the front of it (ARX). When the
+        # robot stops at the front (stop_at_sign), it tells AMCL where that
+        # is on the tunnel map - start_x/y/yaw, map frame - and sends Nav2 to
+        # the exit in the same breath, while control_lane hands /cmd_vel over.
+        #
+        # The yaw: map yaw at the front is start_yaw_deg when the robot faces
+        # start_odom_yaw_deg on odom, which is where the stop has always been
+        # measured (-88.5). Off by a few degrees on a given run, it is off by
+        # the same on the map, so AMCL starts from the heading the robot really
+        # has rather than the one it had when the map was made.
+        self.declare_parameter('tunnel.nav.enabled', True)
+        self.declare_parameter('tunnel.nav.start_x', 0.0)
+        self.declare_parameter('tunnel.nav.start_y', 0.0)
+        self.declare_parameter('tunnel.nav.start_yaw_deg', 0.0)
+        self.declare_parameter('tunnel.nav.start_odom_yaw_deg', -90.0)
+        self.declare_parameter('tunnel.nav.goal_x', 1.85)
+        self.declare_parameter('tunnel.nav.goal_y', 1.90)
+        self.declare_parameter('tunnel.nav.goal_yaw_deg', 0.0)
+        # Standard deviation of the pose given to AMCL - how far off the
+        # stop may be from where the map says the front is.
+        self.declare_parameter('tunnel.nav.start_sigma_m', 0.10)
+        self.declare_parameter('tunnel.nav.start_sigma_deg', 10.0)
+        # Wait for AMCL to take the pose before sending the goal: until it
+        # reports the robot within localise_tol_m of start_x/y, sending the
+        # pose again every half second, for at most localise_s. Just waiting
+        # for the next /amcl_pose was not enough - AMCL runs all along from a
+        # placeholder pose, and its next report was still where it had
+        # drifted to (1.68, 1.27), so Nav2 planned from there and failed.
+        self.declare_parameter('tunnel.nav.localise_s', 3.0)
+        self.declare_parameter('tunnel.nav.localise_tol_m', 0.25)
+        # Nav2 not answering in this long: it is not running. Stop.
+        self.declare_parameter('tunnel.nav.server_wait_s', 5.0)
+        self.declare_parameter('tunnel.nav.give_up_s', 60.0)
+        # At the exit: follow the lane on from there (true) or stop. A failed
+        # or timed-out Nav2 run stops either way - the robot is somewhere in
+        # the tunnel, not on a lane.
+        self.declare_parameter('tunnel.nav.follow_lane_after', True)
+
         self.declare_parameter('rate_hz', 10.0)
 
         # The world heading the robot is standing at before it moves (ARX).
@@ -1192,6 +1240,35 @@ class MissionControl(Node):
         self.pub_avoid = self.create_publisher(Bool, '/avoid_active', 1)
         self.pub_avoid_cmd = self.create_publisher(Twist, '/avoid_control', 1)
         self.pub_max_vel = self.create_publisher(Float64, '/control/max_vel', 1)
+        # ARX: the tunnel on Nav2 - see tunnel.nav.
+        self.pub_nav_active = self.create_publisher(Bool, '/arx/nav_active', 1)
+        self.pub_initialpose = self.create_publisher(
+            PoseWithCovarianceStamped, '/initialpose', 1)
+        self.create_subscription(
+            PoseWithCovarianceStamped, '/amcl_pose', self.on_amcl_pose, 1)
+        self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        # Where Nav2 thinks the robot is: map->base_footprint on TF, which is
+        # what bt_navigator plans from. /amcl_pose is not - AMCL publishes the
+        # new pose there the moment it takes /initialpose, but only moves the
+        # map->odom TF on its next scan, and a goal sent in between was
+        # planned from where AMCL had drifted to (1.43, 1.69) and failed.
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        # Wiped once the pose has landed, before the goal: anything marked
+        # while AMCL was on its placeholder pose is in the wrong place.
+        self.clear_costmaps = [
+            self.create_client(ClearEntireCostmap, name) for name in (
+                '/global_costmap/clear_entirely_global_costmap',
+                '/local_costmap/clear_entirely_local_costmap')]
+        self.nav_want = False
+        self.nav_phase = None
+        self.nav_goal = None
+        self.nav_result = None
+        self.nav_pose_at = None
+        self.amcl_pose_at = None
+        self.nav_refused = False
+        self.nav_sent_at = None
+        self.amcl_xy = None
         self.create_subscription(UInt8, '/detect/lane_state', self.on_lane_state, 1)
         self.create_subscription(UInt8, '/arx/traffic_light', self.on_light, 1)
         self.create_subscription(UInt8, '/detect/traffic_sign', self.on_sign, 1)
@@ -1444,8 +1521,12 @@ class MissionControl(Node):
         if self.stage_since is None:
             self.stage_since = now
         self.max_vel_want = None
+        self.nav_want = False
         self.tick_stage(now)
         self.send_max_vel()
+        # Every tick, like drive_enable: a control_lane restarted mid-run
+        # picks it up, and any stage but tunnel_nav takes the wheel back.
+        self.pub_nav_active.publish(Bool(data=self.nav_want))
 
     def sign_hunt_speed(self):
         """Ask for speed.sign_hunt on /control/max_vel, if set (ARX)."""
@@ -1508,6 +1589,8 @@ class MissionControl(Node):
             self.tick_wait_bar(now)
         elif self.stage == STAGE_DRIVE_TO_TUNNEL:
             self.tick_drive_to_tunnel(now)
+        elif self.stage == STAGE_TUNNEL_NAV:
+            self.tick_tunnel_nav(now)
         else:
             self.tick_stopped()
 
@@ -3309,7 +3392,11 @@ class MissionControl(Node):
                         self.get_logger().info(
                             f'{self.front_range:.2f} m ahead after the tunnel sign - '
                             f'at the tunnel front, facing {where}')
-                        self.stop('at the tunnel front - stopping here, as asked')
+                        if self.get_parameter('tunnel.nav.enabled').value:
+                            self.nav_phase = None
+                            self.go(STAGE_TUNNEL_NAV, 'at the tunnel front - Nav2 to the exit')
+                        else:
+                            self.stop('at the tunnel front - stopping here, as asked')
                         return
                 else:
                     self.tunnel_ticks = 0
@@ -3377,6 +3464,167 @@ class MissionControl(Node):
             self.set_avoid(True, angular=0.0, linear=0.0)
             self.set_avoid(False)
             self.go(STAGE_FOLLOW_SIDE, 'gave up on the tunnel')
+
+    def on_amcl_pose(self, msg):
+        """Where AMCL last put the robot, so a goal waits for the pose to land (ARX)."""
+        self.amcl_pose_at = self.now()
+        self.amcl_xy = (msg.pose.pose.position.x, msg.pose.pose.position.y)
+
+    def map_xy(self):
+        """The robot on the map as Nav2 sees it - latest map->base_footprint (ARX)."""
+        try:
+            t = self.tf_buffer.lookup_transform("map", "base_footprint", Time())
+        except Exception:
+            return None
+        return (t.transform.translation.x, t.transform.translation.y)
+
+    def send_initial_pose(self):
+        """Tell AMCL the robot is at the front of the tunnel, on the map (ARX)."""
+        g = self.get_parameter
+        yaw = g('tunnel.nav.start_yaw_deg').value
+        if self.yaw is not None:
+            off = (self.yaw - g('tunnel.nav.start_odom_yaw_deg').value + 180.0) % 360.0 - 180.0
+            yaw += off
+        msg = PoseWithCovarianceStamped()
+        msg.header.frame_id = 'map'
+        # Stamp zero, not now: AMCL looks up base->odom at the stamp, and over
+        # WiFi "now" is a few ms ahead of the newest TF - "Failed to transform
+        # initial pose in time (extrapolation into the future)". Zero is the
+        # latest it has.
+        msg.pose.pose.position.x = float(g('tunnel.nav.start_x').value)
+        msg.pose.pose.position.y = float(g('tunnel.nav.start_y').value)
+        msg.pose.pose.orientation.z = math.sin(math.radians(yaw) / 2.0)
+        msg.pose.pose.orientation.w = math.cos(math.radians(yaw) / 2.0)
+        sxy = g('tunnel.nav.start_sigma_m').value ** 2
+        syaw = math.radians(g('tunnel.nav.start_sigma_deg').value) ** 2
+        cov = [0.0] * 36
+        cov[0] = cov[7] = sxy
+        cov[35] = syaw
+        msg.pose.covariance = cov
+        self.pub_initialpose.publish(msg)
+        self.get_logger().info(
+            f'initial pose to AMCL: ({msg.pose.pose.position.x:.2f}, '
+            f'{msg.pose.pose.position.y:.2f}) facing {yaw:+.1f} deg on the map')
+
+    def send_nav_goal(self):
+        """Send Nav2 to the tunnel exit (ARX)."""
+        g = self.get_parameter
+        goal = NavigateToPose.Goal()
+        goal.pose = PoseStamped()
+        goal.pose.header.frame_id = 'map'
+        goal.pose.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.pose.position.x = float(g('tunnel.nav.goal_x').value)
+        goal.pose.pose.position.y = float(g('tunnel.nav.goal_y').value)
+        yaw = math.radians(g('tunnel.nav.goal_yaw_deg').value)
+        goal.pose.pose.orientation.z = math.sin(yaw / 2.0)
+        goal.pose.pose.orientation.w = math.cos(yaw / 2.0)
+        self.nav_result = None
+        self.nav_goal = None
+        self.nav_refused = False
+        self.nav_sent_at = self.now()
+        future = self.nav_client.send_goal_async(goal)
+        future.add_done_callback(self.on_nav_goal)
+        self.get_logger().info(
+            f'Nav2 goal: the tunnel exit at ({goal.pose.pose.position.x:.2f}, '
+            f'{goal.pose.pose.position.y:.2f})')
+
+    def on_nav_goal(self, future):
+        handle = future.result()
+        if not handle.accepted:
+            # bt_navigator rejects while its lifecycle is still coming up -
+            # tick_tunnel_nav tries again until server_wait_s.
+            self.nav_refused = True
+            self.get_logger().warn('Nav2 refused the goal - bt_navigator not active yet?')
+            return
+        self.nav_goal = handle
+        handle.get_result_async().add_done_callback(self.on_nav_result)
+
+    def on_nav_result(self, future):
+        self.nav_result = future.result().status
+
+    def tick_tunnel_nav(self, now):
+        """Nav2 from the front of the tunnel to its exit, then stop (ARX).
+
+        The pose and the goal go out in the same moment the robot reaches the
+        front - Nav2 and AMCL have been up since the start of the run, so
+        there is nothing to wait for but AMCL taking the pose, about a scan.
+        control_lane passes Nav2's commands to /cmd_vel while nav_want holds.
+        """
+        self.set_driving(False)
+        self.set_avoid(False)
+        self.set_armed(MISSION_NONE)
+        self.nav_want = True
+        g = self.get_parameter
+        waited = now - self.stage_since
+
+        if self.nav_phase is None:
+            if not self.nav_client.server_is_ready():
+                if waited > g('tunnel.nav.server_wait_s').value:
+                    self.get_logger().warn(
+                        f'no Nav2 after {waited:.0f} s - is full.launch running with '
+                        f'nav:=true? Stopping at the tunnel front')
+                    self.stop('no Nav2')
+                return
+            self.send_initial_pose()
+            self.nav_pose_at = now
+            self.nav_phase = 'localise'
+            return
+
+        if self.nav_phase == 'localise':
+            sx, sy = g('tunnel.nav.start_x').value, g('tunnel.nav.start_y').value
+            xy = self.map_xy()
+            off = None if xy is None else math.hypot(xy[0] - sx, xy[1] - sy)
+            if off is not None and off <= g('tunnel.nav.localise_tol_m').value:
+                self.get_logger().info(
+                    f'TF has the robot at ({xy[0]:.2f}, {xy[1]:.2f}) on the map, '
+                    f'{off:.2f} m from the front - sending the goal')
+            elif waited > g('tunnel.nav.localise_s').value:
+                where = 'no map->base_footprint' if xy is None else f'({xy[0]:.2f}, {xy[1]:.2f})'
+                self.get_logger().warn(
+                    f'TF still has the robot at {where} after {waited:.1f} s '
+                    f'- sending the goal anyway')
+            else:
+                if now - self.nav_pose_at > 0.5:
+                    self.send_initial_pose()
+                    self.nav_pose_at = now
+                return
+            for client in self.clear_costmaps:
+                if client.service_is_ready():
+                    client.call_async(ClearEntireCostmap.Request())
+            self.send_nav_goal()
+            self.nav_phase = 'going'
+            return
+
+        if self.nav_refused:
+            if waited > g('tunnel.nav.server_wait_s').value:
+                self.get_logger().warn(
+                    f'Nav2 still refusing after {waited:.0f} s - its bringup probably '
+                    f'aborted (see lifecycle_manager_navigation). Stopping at the tunnel front')
+                self.stop('Nav2 not active')
+            elif now - self.nav_sent_at > 0.5:
+                self.send_nav_goal()
+            return
+
+        if self.nav_result is not None:
+            if self.nav_result == GoalStatus.STATUS_SUCCEEDED:
+                self.get_logger().info(f'Nav2 reached the tunnel exit after {waited:.1f} s')
+                if g('tunnel.nav.follow_lane_after').value:
+                    # nav_want is not set on the next tick, so control_lane
+                    # takes the wheel back and steers by the lane again.
+                    self.go(STAGE_FOLLOW_SIDE, 'out of the tunnel - back on the lane')
+                else:
+                    self.stop('out of the tunnel')
+            else:
+                self.get_logger().warn(
+                    f'Nav2 did not reach the exit (status {self.nav_result}) after {waited:.1f} s')
+                self.stop('Nav2 failed in the tunnel')
+            return
+
+        if waited > g('tunnel.nav.give_up_s').value:
+            self.get_logger().warn(f'Nav2 still going after {waited:.0f} s - cancelling')
+            if self.nav_goal is not None:
+                self.nav_goal.cancel_goal_async()
+            self.stop('Nav2 timed out in the tunnel')
 
     def tick_stopped(self):
         self.set_armed(MISSION_NONE)

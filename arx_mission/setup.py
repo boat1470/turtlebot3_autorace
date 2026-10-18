@@ -22,6 +22,9 @@ setup(
         (os.path.join('share', package_name, 'image'),
          [f for f in glob('image/*') if os.path.isfile(f)]),
         (os.path.join('share', package_name, 'model'), glob('model/*.sdf')),
+        # The maps nav.launch.py localises on (tunnel.yaml + tunnel.pgm).
+        (os.path.join('share', package_name, 'map'),
+         [f for f in glob('map/*') if os.path.isfile(f)]),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

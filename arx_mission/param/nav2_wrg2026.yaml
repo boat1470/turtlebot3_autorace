@@ -1,0 +1,520 @@
+# REFERENCE ONLY - not loaded by anything. The WRG 2026 Nav2 params as
+# used on the robot last season, kept unchanged so nav2.yaml (what
+# nav.launch.py loads) can be diffed against it:
+#
+#     diff param/nav2_wrg2026.yaml param/nav2.yaml
+#
+amcl:
+  ros__parameters:
+    # WRG 2026 tuned — อ้างอิงจาก nav2_params_2025.yaml (ใช้จริงปีที่แล้ว)
+    # Burger encoder + IMU แม่นบนพื้นเรียบ → trust odometry (alpha ต่ำ)
+    alpha1: 0.05          # WRG: was 0.2 — rot noise from rot
+    alpha2: 0.05          # WRG: was 0.2 — rot noise from trans
+    alpha3: 0.01          # WRG: was 0.2 — trans noise from trans
+    alpha4: 0.02          # WRG: was 0.2 — trans noise from rot
+    alpha5: 0.02          # WRG: was 0.2 — trans noise from total
+    base_frame_id: "base_footprint"
+    beam_skip_distance: 0.5
+    beam_skip_error_threshold: 0.9
+    beam_skip_threshold: 0.3
+    do_beamskip: false
+    global_frame_id: "map"
+    lambda_short: 0.1
+    laser_likelihood_max_dist: 2.0
+    laser_max_range: 3.5    # WRG: was 100.0 — LDS-08 spec จริง (beyond 3.5 = noise)
+    laser_min_range: -1.0
+    laser_model_type: "likelihood_field"
+    max_beams: 60
+    max_particles: 2000
+    min_particles: 500
+    odom_frame_id: "odom"
+    pf_err: 0.05
+    pf_z: 0.99
+    recovery_alpha_fast: 0.0
+    recovery_alpha_slow: 0.0
+    resample_interval: 1
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    save_pose_rate: 0.5
+    sigma_hit: 0.2
+    tf_broadcast: true
+    transform_tolerance: 1.0   # WRG: was 0.5 — tighter, trust TF
+    update_min_a: 0.1          # WRG: was 0.2 — update particle ถี่ขึ้น
+    update_min_d: 0.1          # WRG: was 0.25 — update particle ถี่ขึ้น
+    z_hit: 0.5
+    z_max: 0.05
+    z_rand: 0.5
+    z_short: 0.05
+    scan_topic: scan
+    map_topic: map
+    set_initial_pose: true     # WRG: was false — auto pose ที่ START (ไม่ต้องคลิก RViz)
+    always_reset_initial_pose: false
+    first_map_only: false
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      yaw: 0.0
+
+bt_navigator:
+  ros__parameters:
+    global_frame: map
+    robot_base_frame: base_link
+    transform_tolerance: 0.5
+    filter_duration: 0.3
+    default_nav_to_pose_bt_xml: "$(find-pkg-share nav2_bt_navigator)/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml" # behavior trees location.
+    default_nav_through_poses_bt_xml: "$(find-pkg-share nav2_bt_navigator)/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml"
+    always_reload_bt_xml: false
+    goal_blackboard_id: goal
+    goals_blackboard_id: goals
+    path_blackboard_id: path
+    navigators: ['navigate_to_pose', 'navigate_through_poses']
+    navigate_to_pose:
+      plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
+    navigate_through_poses:
+      plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
+    error_code_name_prefixes:
+      - assisted_teleop
+      - backup
+      - compute_path
+      - dock_robot
+      - drive_on_heading
+      - follow_path
+      - nav_thru_poses
+      - nav_to_pose
+      - spin
+      - route
+      - undock_robot
+      - wait
+
+docking_server:
+  ros__parameters:
+    dock_plugins: ['nova_carter_dock']
+    nova_carter_dock:
+      plugin: 'opennav_docking::SimpleChargingDock'
+    docks: ['home_dock','flex_dock1', 'flex_dock2']
+    home_dock:
+      type: 'nova_carter_dock'
+      frame: map
+      pose: [0.0, 0.0, 0.0]
+    flex_dock1:
+      type: 'nova_carter_dock'
+      frame: map
+      pose: [10.0, 10.0, 0.0]
+    flex_dock2:
+      type: 'nova_carter_dock'
+      frame: map
+      pose: [30.0, 30.0, 0.0]
+    enable_stamped_cmd_vel: true
+
+controller_server:
+  ros__parameters:
+    controller_frequency: 10.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 1.5
+    progress_checker_plugins: ["progress_checker"]
+    goal_checker_plugins: ["goal_checker"]
+    controller_plugins: ["FollowPath"]
+    # WRG 2026 tuned — checker ที่ตรวจ "หุ่นเดินหน้าไหม" / "ถึงเป้าไหม"
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.12   # WRG: was 0.1 — สนามเล็ก, margin มากขึ้น
+      movement_time_allowance: 6.0     # WRG: was 10.0 — รู้ stuck ไวขึ้น 4 วินาที
+    goal_checker:
+      stateful: true
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.10          # WRG: 5cm — drop ในเส้นแดงแม่น (was 0.10, Super Bingo priority)
+      yaw_goal_tolerance: 0.26         # WRG: ~3° — heading แม่นเพื่อ AprilTag read
+    FollowPath:
+      # ══════════════════════════════════════════════════════════════════
+      # WRG 2026: Regulated Pure Pursuit — deterministic path following,
+      # cost-regulated speed, `use_rotate_to_heading` for AprilTag heading.
+      # ══════════════════════════════════════════════════════════════════
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+
+      # ── Velocity ──
+      desired_linear_vel:  0.20             # 91% Burger max (safety margin 10%)
+      min_approach_linear_velocity: 0.05    # slow crawl approaching goal
+      approach_velocity_scaling_dist: 0.20   # start slowing 60cm before goal
+
+      # ── Lookahead (adaptive for small 3.2×2.8m arena) ──
+      use_velocity_scaled_lookahead_dist: true
+      lookahead_time: 1.5
+      min_lookahead_dist: 0.2               # 30cm min — arena size aware
+      max_lookahead_dist: 0.6               # 60cm max
+
+      # ── Heading rotation (critical for AprilTag) ──
+      use_rotate_to_heading: true
+      rotate_to_heading_min_angle: 1.0    # 45° — rotate in place if path heading >45° off
+      rotate_to_heading_angular_vel: 2.0    # match Burger safe angular
+      max_angular_accel: 1.8
+
+      # ── Regulation: auto-slow at curves + near obstacles ──
+      use_regulated_linear_velocity_scaling: true
+      regulated_linear_scaling_min_radius: 0.5   # slow if turn radius < 50cm
+      regulated_linear_scaling_min_speed: 0.15
+
+      use_cost_regulated_linear_velocity_scaling: true
+      cost_scaling_dist: 0.15                # scale within 30cm of obstacles
+      cost_scaling_gain: 0.5                # WRG: was 1.0 — ชะลอน้อยลงตอนใกล้กำแพง
+      inflation_cost_scaling_factor: 3.0    # match costmap inflation_layer
+
+      # ── Collision detection ──
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.0
+
+      # ── Misc ──
+      transform_tolerance: 0.2
+      allow_reversing: false                # diff-drive Burger, forward only
+
+      # ══════════════════════════════════════════════════════════════════
+      # ROLLBACK: to restore DWB + Rotation Shim, comment the RPP block
+      # above and un-comment the block below.
+      # ══════════════════════════════════════════════════════════════════
+      # # WRG 2026: Rotation Shim wraps DWB — หมุนอยู่กับที่ก่อนถ้า path หันคนละทาง
+      # # เหมาะกับ StraightLine planner (non-kinematic) + diff-drive Burger
+      # plugin: "nav2_rotation_shim_controller::RotationShimController"
+      # primary_controller: "dwb_core::DWBLocalPlanner"
+      # angular_dist_threshold: 0.4        # 23° — trigger rotate if path heading > 23° off
+      # forward_sampling_distance: 0.3     # ดู path ล่วงหน้า 30cm (arena เล็ก)
+      # rotate_to_heading_angular_vel: 1.0 # match max_vel_theta ด้านล่าง
+      # max_angular_accel: 3.2             # match acc_lim_theta ด้านล่าง
+      # max_cost_threshold: 254.0          # default (LETHAL_OBSTACLE)
+      # simulate_ahead_time: 1.0           # sim ล่วงหน้า 1s เช็ค collision
+      # # ── DWB params (primary controller — Shim ส่งต่อให้อันนี้) ──
+      # debug_trajectory_details: true
+      # min_vel_x: 0.0                 # WRG: was 0.0 — allow backup 10cm/s for recovery behavior
+      # min_vel_y: 0.0
+      # max_vel_x: 0.20                  # WRG: was 0.3 → 0.22 → 0.20 — 91% Burger max (safety margin 10%)
+      # max_vel_y: 0.0
+      # max_vel_theta: 1.0
+      # min_speed_xy: 0.0
+      # max_speed_xy: 0.20               # WRG: was 0.3 — fix mismatch, match max_vel_x
+      # min_speed_theta: 0.0
+      # # Add high threshold velocity for turtlebot 3 issue.
+      # # https://github.com/ROBOTIS-GIT/turtlebot3_simulations/issues/75
+      # acc_lim_x: 1.0                   # WRG: was 3.0 — smooth, no wheel slip (0→0.22 in 147ms)
+      # acc_lim_y: 0.0
+      # acc_lim_theta: 2.5
+      # decel_lim_x: -1.5                # WRG: was -2.5 — smooth stop, no jerk (24mm overshoot)
+      # decel_lim_y: 0.0
+      # decel_lim_theta: -3.2
+      # vx_samples: 20
+      # vy_samples: 0
+      # vtheta_samples: 40
+      # sim_time: 1.5
+      # linear_granularity: 0.05
+      # angular_granularity: 0.025
+      # transform_tolerance: 0.2
+      # xy_goal_tolerance: 0.14          # WRG: match กับ goal_checker (5cm)
+      # trans_stopped_velocity: 0.01     # WRG: was 0.25 — "ใกล้หยุดสนิท" (0.25 ขับช้ายังไม่ถือว่าหยุด — ผิดความหมาย)
+      # short_circuit_trajectory_evaluation: true
+      # stateful: true
+      # critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      # BaseObstacle.scale: 0.02
+      # PathAlign.scale: 32.0
+      # PathAlign.forward_point_distance: 0.1
+      # GoalAlign.scale: 24.0
+      # GoalAlign.forward_point_distance: 0.1
+      # PathDist.scale: 32.0
+      # GoalDist.scale: 24.0
+      # RotateToGoal.scale: 32.0
+      # RotateToGoal.slowing_factor: 5.0
+      # RotateToGoal.lookahead_time: -1.0
+    enable_stamped_cmd_vel: true
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: base_link
+      transform_tolerance: 1.0
+      rolling_window: true
+      width: 3
+      height: 3
+      resolution: 0.05
+      # Rectangle footprint (burger + back extension, 21 × 18 cm).
+      # Base_link at burger center: front +6.9cm, back -13.9cm, sides ±9cm.
+      # footprint: "[[0.069, 0.09], [0.069, -0.09], [-0.139, -0.09], [-0.139, 0.09]]"
+      # footprint_padding: 0.02          # 2cm safety margin around polygon
+      robot_radius: 0.1
+      plugins: ["obstacle_layer", "voxel_layer", "inflation_layer"]
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.13           # WRG: was 0.5 — สนาม 3.2×2.8m, track 50cm (default block ทาง)
+        cost_scaling_factor: 3.0         # คงเดิม
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: true
+        publish_voxel_map: true
+        origin_z: 0.0
+        z_resolution: 0.05
+        z_voxels: 16
+        max_obstacle_height: 2.0
+        mark_threshold: 0
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0  # test
+      static_layer:
+        map_subscribe_transient_local: true
+      always_send_full_costmap: true
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_link
+      transform_tolerance: 1.0
+      # Rectangle footprint (burger + back extension, 21 × 18 cm).
+      # Base_link at burger center: front +6.9cm, back -13.9cm, sides ±9cm.
+      # footprint: "[[0.069, 0.09], [0.069, -0.09], [-0.139, -0.09], [-0.139, 0.09]]"
+      # footprint_padding: 0.02          # 2cm safety margin around polygon
+      robot_radius: 0.1
+      resolution: 0.05
+      track_unknown_space: true
+      plugins: ["static_layer", "obstacle_layer", "voxel_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0 # test
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: true
+        publish_voxel_map: true
+        origin_z: 0.0
+        z_resolution: 0.05
+        z_voxels: 16
+        max_obstacle_height: 2.0
+        mark_threshold: 0
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0 # test
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
+        transform_tolerance: 0.1
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.13           # WRG: was 0.5 — สนาม 3.2×2.8m, track 50cm
+        cost_scaling_factor: 3.0         # คงเดิม
+      always_send_full_costmap: true
+
+map_server:
+  ros__parameters:
+    yaml_filename: "map.yaml"
+
+map_saver:
+  ros__parameters:
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: true
+
+planner_server:
+  ros__parameters:
+    # WRG 2026: switched to straight-line planner for deterministic paths.
+    # Robot follows the paths in paths.yaml exactly (no costmap-based rerouting).
+    expected_planner_frequency: 20.0
+    planner_plugins: ["GridBased"]
+    GridBased:
+      # plugin: "nav2_straightline_planner::StraightLine"   # WRG: was nav2_navfn_planner::NavfnPlanner
+      # interpolation_resolution: 0.1                        # 10cm between interpolated points
+      # NOTE: StraightLine ignores costmap. Waypoints must be outside walls/inflation.
+      # Fallback (Nav2 default NavFn planner):
+      plugin: "nav2_navfn_planner::NavfnPlanner"
+      tolerance: 0.1
+      use_astar: false
+      allow_unknown: false
+
+behavior_server:
+  ros__parameters:
+    local_costmap_topic: local_costmap/costmap_raw
+    local_footprint_topic: local_costmap/published_footprint
+    global_costmap_topic: global_costmap/costmap_raw
+    global_footprint_topic: global_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait", "assisted_teleop"]
+    spin:
+      plugin: "nav2_behaviors::Spin" # In Iron and older versions, "/" was used instead of "::"
+    backup:
+      plugin: "nav2_behaviors::BackUp" # In Iron and older versions, "/" was used instead of "::"
+    drive_on_heading:
+      plugin: "nav2_behaviors::DriveOnHeading" # In Iron and older versions, "/" was used instead of "::"
+    wait:
+      plugin: "nav2_behaviors::Wait" # In Iron and older versions, "/" was used instead of "::"
+    assisted_teleop:
+      plugin: "nav2_behaviors::AssistedTeleop" # In Iron and older versions, "/" was used instead of "::"
+    local_frame: odom
+    global_frame: map
+    robot_base_frame: base_link
+    transform_timeout: 0.1
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 1.0
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 3.2
+    enable_stamped_cmd_vel: true
+
+waypoint_follower:
+  ros__parameters:
+    loop_rate: 20
+    stop_on_failure: false
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: true
+      waypoint_pause_duration: 200
+
+collision_monitor:
+  ros__parameters:
+    base_frame_id: "base_footprint"
+    odom_frame_id: "odom"
+    cmd_vel_in_topic: "cmd_vel_smoothed"
+    cmd_vel_out_topic: "cmd_vel"
+    state_topic: "collision_monitor_state"
+    transform_tolerance: 0.5
+    # ต่างจาก TB3 default (burger.yaml: node 5.0 + per-source 0.2) โดยเจตนา —
+    # ค่านั้นตั้งบนสมมติฐาน Nav2 รันบน Pi (localhost) แต่เรารัน Nav2 บน PC ข้าม WiFi.
+    # /scan วัดได้ 7.1 Hz (คาบ ~0.14 s) และ ros2 topic delay เห็น spike ถึง 0.7-0.9 s
+    # เมื่อ /camera/image_raw เต็ม WiFi bandwidth (~45 MB/s). 1.2 s ≈ 8.5 คาบ
+    # → ทน scan หลุด 6-7 เฟรม แต่ถ้า lidar ตายจริง = ไถลตาบอด 26 cm ที่ 0.22 m/s.
+    # อย่าตั้งค่านี้ซ้ำใต้ `scan:` — per-source override ชนะ node-level (เคยพลาดแล้ว).
+    source_timeout: 1.2
+    base_shift_correction: true
+    stop_pub_timeout: 2.0
+    enable_stamped_cmd_vel: true
+    use_realtime_priority: false
+    polygons: ["PolygonStop", "PolygonSlow", "FootprintApproach"]
+    PolygonStop:
+      type: "circle"
+      radius: 0.1
+      action_type: "stop"
+      min_points: 4
+      visualize: true
+      polygon_pub_topic: "polygon_stop"
+      enabled: true
+    PolygonSlow:
+      type: "polygon"
+      points: "[[0.1, 0.1], [0.1, -0.1], [-0.1, -0.1], [-0.1, 0.1]]"
+      action_type: "slowdown"
+      min_points: 4
+      slowdown_ratio: 0.3
+      visualize: true
+      polygon_pub_topic: "polygon_slowdown"
+      enabled: true
+    PolygonLimit:
+      type: "polygon"
+      points: "[[0.1, 0.1], [0.1, -0.1], [-0.1, -0.1], [-0.1, 0.1]]"
+      action_type: "limit"
+      min_points: 4
+      linear_limit: 0.4
+      angular_limit: 0.5
+      visualize: true
+      polygon_pub_topic: "polygon_limit"
+      enabled: true
+    FootprintApproach:
+      type: "polygon"
+      action_type: "approach"
+      footprint_topic: "/local_costmap/published_footprint"
+      time_before_collision: 2.0
+      simulation_time_step: 0.02
+      min_points: 6
+      visualize: False
+      enabled: true
+    VelocityPolygonStop:
+      type: "velocity_polygon"
+      action_type: "stop"
+      min_points: 6
+      visualize: true
+      enabled: False
+      polygon_pub_topic: "velocity_polygon_stop"
+      velocity_polygons: ["rotation", "translation_forward", "translation_backward", "stopped"]
+      holonomic: false
+      rotation:
+        points: "[[0.3, 0.3], [0.3, -0.3], [-0.3, -0.3], [-0.3, 0.3]]"
+        linear_min: 0.0
+        linear_max: 0.05
+        theta_min: -1.0
+        theta_max: 1.0
+      translation_forward:
+        points: "[[0.35, 0.3], [0.35, -0.3], [-0.2, -0.3], [-0.2, 0.3]]"
+        linear_min: 0.0
+        linear_max: 1.0
+        theta_min: -1.0
+        theta_max: 1.0
+      translation_backward:
+        points: "[[0.2, 0.3], [0.2, -0.3], [-0.35, -0.3], [-0.35, 0.3]]"
+        linear_min: -1.0
+        linear_max: 0.0
+        theta_min: -1.0
+        theta_max: 1.0
+      stopped:
+        points: "[[0.25, 0.25], [0.25, -0.25], [-0.25, -0.25], [-0.25, 0.25]]"
+        linear_min: -1.0
+        linear_max: 1.0
+        theta_min: -1.0
+        theta_max: 1.0
+    observation_sources: ["scan"]
+    scan:
+      # ไม่มี source_timeout ที่นี่โดยเจตนา — ให้สืบทอด node-level ข้างบน.
+      # TB3 default มี `source_timeout: 0.2` ตรงนี้ ซึ่งทับ node-level เสมอ
+      # และทำให้หุ่นกระตุกทุก ~1 s ("Robot to stop due to invalid source").
+      type: "scan"
+      topic: "/scan"
+      enabled: true
+
+velocity_smoother:
+  ros__parameters:
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: "OPEN_LOOP"
+    max_velocity: [0.5, 0.0, 2.5]
+    min_velocity: [-0.5, 0.0, -2.5]
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0
+    max_accel: [2.5, 0.0, 3.2]
+    max_decel: [-2.5, 0.0, -3.2]
+    odom_topic: "odom"
+    odom_duration: 0.1
+    use_realtime_priority: false
+    enable_stamped_cmd_vel: true

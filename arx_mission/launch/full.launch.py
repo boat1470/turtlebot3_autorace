@@ -37,6 +37,8 @@ Arguments:
                         camera one off
     skip_level:=true    leave out the level crossing and go straight on to
                         the tunnel
+    nav:=false          no Nav2 - the tunnel mission stops at the front. On
+                        by default on the robot (auto)
 
 Stages are separated by TimerAction because each one needs the topic the
 previous one publishes: the camera pipeline has nothing to rectify until the
@@ -327,6 +329,12 @@ def stack(context, *unused_args, **unused_kwargs):
     # publish /detect/level_bar. The ultrasonic one is wired to the Pi's GPIO,
     # so it is started on the Pi (level_ultrasonic.launch.py, its own button in
     # the launcher), not here; choosing it only keeps the camera one off.
+    # ARX: Nav2 for the tunnel (nav.launch.py), up from the start so it is
+    # ready when the robot reaches the front. Off in the simulator by default:
+    # the map is of the real course.
+    nav = LaunchConfiguration('nav').perform(context)
+    nav = (not is_sim) if nav == 'auto' else nav.lower() in ('true', '1')
+
     level_source = LaunchConfiguration('level_source').perform(context)
     if level_source == 'auto':
         level_source = 'camera' if is_sim else 'ultrasonic'
@@ -367,6 +375,11 @@ def stack(context, *unused_args, **unused_kwargs):
         include('arx_mission', 'detect_obstacle.launch.py'),
         *([include('arx_mission', 'detect_level.launch.py')]
           if level_source == 'camera' else []),
+        # Its final command goes to control_lane, which drives on it only
+        # while mission_control holds /arx/nav_active.
+        *([include('arx_mission', 'nav.launch.py', rviz='false',
+                   cmd_vel_out='/arx/cmd_vel_nav', use_sim_time=use_sim_time)]
+          if nav else []),
     ]
 
     # The sequencer still comes up before control_lane. It no longer has to -
@@ -463,6 +476,10 @@ def generate_launch_description():
                                           'started separately), or auto - '
                                           'camera with sim:=true, ultrasonic '
                                           'without.'),
+        DeclareLaunchArgument('nav', default_value='auto',
+                              description='Start Nav2 for the tunnel: true, '
+                                          'false, or auto - on without the '
+                                          'simulator.'),
         DeclareLaunchArgument('skip_level', default_value='false',
                               description='Leave out the level crossing '
                                           '(mission 5) and go straight on to '

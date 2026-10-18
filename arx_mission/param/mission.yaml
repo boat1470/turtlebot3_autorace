@@ -1051,6 +1051,37 @@
       # overshot between scans.
       after_sign_max_vel: 0.08
 
+      # From the front of the tunnel to its exit on Nav2 (map/tunnel.yaml,
+      # param/nav2.yaml), then stop. Needs full.launch nav:=true - the
+      # default on the robot. false stops at the front as before.
+      nav:
+        enabled: true
+        # Where the front is on the tunnel map, and which way the robot faces
+        # there - map frame. Read off RViz 2026-10-17.
+        start_x: 0.0
+        start_y: 0.0
+        start_yaw_deg: 0.0
+        # The odom heading the stop is made at (measured -88.5). A stop a few
+        # degrees off this hands AMCL a map heading off by the same.
+        start_odom_yaw_deg: -90.0
+        # The exit. 2026-10-17: was (1.8, 1.5), 0.175 m from a wall; this is
+        # 0.32 m clear.
+        goal_x: 1.85
+        goal_y: 1.90
+        goal_yaw_deg: 0.0
+        start_sigma_m: 0.10
+        start_sigma_deg: 10.0
+        # Wait for AMCL to report the robot within localise_tol_m of the
+        # front before sending the goal, re-sending the pose every 0.5 s.
+        localise_s: 3.0
+        localise_tol_m: 0.25
+        server_wait_s: 5.0
+        give_up_s: 60.0
+        # At the exit, follow the lane on (true) or stop. A failed Nav2 run
+        # stops either way - it is somewhere inside the tunnel, not on a lane.
+        # 2026-10-18: stop - the run ends at the tunnel exit.
+        follow_lane_after: false
+
       speed: 0.04
 
       # Both walls at once, not the right one alone.

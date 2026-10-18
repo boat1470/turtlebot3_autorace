@@ -91,6 +91,17 @@ class ControlLane(Node):
             1
         )
 
+        # ARX: Nav2 drives through this node rather than beside it. Its
+        # collision_monitor publishes on /arx/cmd_vel_nav (nav2.yaml, through
+        # nav.launch.py standalone:=false), and while mission_control holds
+        # /arx/nav_active true that is what goes out on /cmd_vel - instead of
+        # the lane, the avoidance twist or the zero of a hold. One publisher
+        # on /cmd_vel at all times, so the two can never fight over it.
+        self.sub_nav_active = self.create_subscription(
+            Bool, '/arx/nav_active', self.callback_nav_active, 1)
+        self.sub_nav_cmd = self.create_subscription(
+            TwistStamped, '/arx/cmd_vel_nav', self.callback_nav_cmd, 1)
+
         self.pub_cmd_vel = self.create_publisher(
             TwistStamped,
             '/control/cmd_vel',
@@ -204,6 +215,14 @@ class ControlLane(Node):
         # simply stands.
         self.hold_timer = self.create_timer(0.1, self.hold_tick)
 
+        # ARX: Nav2 has the wheel (see /arx/nav_active above).
+        self.nav_active = False
+        self.nav_time = None
+        # A Nav2 command older than this is not driven on: with Nav2 across
+        # WiFi a lost stream must stop the robot, not leave it on its last
+        # command.
+        self.declare_parameter('control.nav_timeout_s', 0.5)
+
     def callback_get_max_vel(self, max_vel_msg):
         # ARX: log it. This overrides control.max_vel for the rest of the
         # run and nothing said so before, which would make a robot that had
@@ -228,7 +247,7 @@ class ControlLane(Node):
         """
         if not self.driving:      # ARX
             return
-        if self.avoid_active:
+        if self.avoid_active or self.nav_active:
             return
 
         center = desired_center.data
@@ -306,8 +325,26 @@ class ControlLane(Node):
     def callback_avoid_cmd(self, twist_msg):
         self.avoid_twist = twist_msg
 
-        if self.avoid_active:
+        if self.avoid_active and not self.nav_active:
             self.publish_cmd_vel(self.avoid_twist)
+
+    # ARX: added.
+    def callback_nav_active(self, bool_msg):
+        if bool_msg.data == self.nav_active:
+            return
+        self.nav_active = bool_msg.data
+        self.nav_time = None
+        self.get_logger().info(
+            'Nav2 driving' if self.nav_active else 'Nav2 released - back to the lane')
+        if not self.nav_active:
+            self.publish_cmd_vel(Twist())
+
+    # ARX: added.
+    def callback_nav_cmd(self, msg):
+        if not self.nav_active:
+            return
+        self.nav_time = self.get_clock().now().nanoseconds * 1e-9
+        self.publish_cmd_vel(msg.twist)
 
     def callback_avoid_active(self, bool_msg):
         # ARX: log on the change, not on every message. The original logged
@@ -338,6 +375,13 @@ class ControlLane(Node):
 
     # ARX: added.
     def hold_tick(self):
+        if self.nav_active:
+            # Nav2 publishes; this only stops a stream that has gone quiet.
+            now = self.get_clock().now().nanoseconds * 1e-9
+            stale = self.get_parameter('control.nav_timeout_s').value
+            if self.nav_time is None or now - self.nav_time > stale:
+                self.publish_cmd_vel(Twist())
+            return
         if not self.driving:
             self.publish_cmd_vel(Twist())
 
