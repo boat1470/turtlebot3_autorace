@@ -47,6 +47,7 @@ def generate_launch_description():
     start_stage = LaunchConfiguration('start_stage')
     spawn_yaw_deg = LaunchConfiguration('spawn_yaw_deg')
     skip_level = LaunchConfiguration('skip_level')
+    level_source = LaunchConfiguration('level_source')
 
     args = [
         DeclareLaunchArgument(
@@ -72,6 +73,11 @@ def generate_launch_description():
             'skip_level', default_value='false',
             description='Leave out the level crossing (mission 5) and go '
                         'straight on to the tunnel.'),
+        DeclareLaunchArgument(
+            'level_source', default_value='ultrasonic',
+            description='What reads the crossing bar: ultrasonic (decide from '
+                        '/detect/level_range against level.slow_m / stop_m / '
+                        'clear_m) or camera (decide from /detect/level_bar).'),
     ]
 
     mission_control = Node(
@@ -92,6 +98,7 @@ def generate_launch_description():
             {'start_stage': ParameterValue(start_stage, value_type=str)},
             {'spawn_yaw_deg': ParameterValue(spawn_yaw_deg, value_type=float)},
             {'skip_level': ParameterValue(skip_level, value_type=bool)},
+            {'level.source': ParameterValue(level_source, value_type=str)},
         ],
     )
 

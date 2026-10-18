@@ -30,6 +30,9 @@
         # Nearer than this, the bar is down. Further out than mission
         # control's 0.30 m stop so it has something to creep towards, and
         # inside the 0.60 m it is allowed to creep (level.max_creep_m).
+        # Only what /detect/level_bar says - lane_debug's up/down. Since
+        # 2026-10-18 mission_control decides from /detect/level_range with its
+        # own thresholds (level.slow_m / stop_m / clear_m, mission.yaml).
         down_m: 0.45
 
         # No echo, or further than this, reads as this.

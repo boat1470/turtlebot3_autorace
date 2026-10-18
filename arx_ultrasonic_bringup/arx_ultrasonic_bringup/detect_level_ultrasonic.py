@@ -11,15 +11,21 @@ lifts for 5 s when its own sensor sees the robot inside 20 cm. All the robot
 has to know is whether something is standing across the lane in front of it,
 and how far away - which is what an ultrasonic sensor measures directly.
 
-It publishes the same two topics as detect_level, with the same meaning, so
-mission_control does not know or care which one is running:
+It only measures. The deciding is mission_control's (level.slow_m,
+stop_m, clear_m in mission.yaml), so the thresholds live with the rest of the
+mission and change without touching the Pi:
 
-    /detect/level_bar     UInt8    0 nothing, 1 up, 2 down
-    /detect/level_range   Float32  metres to the bar, 9.9 when it is not down
+    /detect/level_range   Float32  metres to the nearest echo ahead, every
+                                   reading; max_m when there is none
+    /detect/level_bar     UInt8    1 up / 2 down by down_m - for lane_debug
+                                   and the camera detector's old meaning only;
+                                   mission_control does not use it with the
+                                   ultrasonic (level.use_range)
 
-Down is "the median of the last few readings is nearer than down_m". Up is
-anything else, including no echo at all - with the bar lifted there is
-nothing in front of the sensor to reflect.
+One threshold could not serve both ends: starting to slow wants something
+far (0.45 m), and deciding the bar is up once the robot stands 0.10 m from
+it wants something near - at 0.45 the bar's own post, still in the cone,
+read as "down" and kept the robot waiting 15 s after the bar had lifted.
 
 The median is what keeps the robot out of the bar. A single lost echo reads
 as far away, which is "up", and wait_bar leaves after five ticks of up. One
@@ -201,8 +207,8 @@ class DetectLevelUltrasonic(Node):
         bar = BAR_DOWN if median < down_m else BAR_UP
 
         self.pub_bar.publish(UInt8(data=bar))
-        self.pub_range.publish(
-            Float32(data=float(median) if bar == BAR_DOWN else RANGE_NONE))
+        # Every reading, down or not - mission_control decides from the range.
+        self.pub_range.publish(Float32(data=float(median)))
 
         if bar != self.bar:
             self.bar = bar

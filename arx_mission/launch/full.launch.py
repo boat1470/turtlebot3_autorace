@@ -366,6 +366,7 @@ def stack(context, *unused_args, **unused_kwargs):
                 start_stage=preset['stage'],
                 spawn_yaw_deg=preset['yaw'],
                 skip_level=LaunchConfiguration('skip_level'),
+                level_source=level_source,
                 use_sim_time=use_sim_time),
         # Both detectors idle until mission_control arms them, so their
         # position in the order only has to be after the camera pipeline.

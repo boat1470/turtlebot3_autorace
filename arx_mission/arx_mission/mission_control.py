@@ -889,12 +889,27 @@ class MissionControl(Node):
         # room to spare.
         self.declare_parameter('level.stop_m', 0.30)
         self.declare_parameter('level.speed', 0.04)
+        # Up to the bar on the lane, capped at approach_max_vel, rather than
+        # on a held heading at level.speed (false).
+        self.declare_parameter('level.approach_follow_lane', True)
+        self.declare_parameter('level.approach_max_vel', 0.10)
         # A cap on the creep, because /detect/level_range is only trustworthy
         # inside about 0.50 m: further out the detector often resolves three
         # of the four bands and the span it measures is between the wrong
         # two. The range is what aims; this is what stops a bad one running
         # the robot into the bar.
         self.declare_parameter('level.max_creep_m', 0.60)
+        # What decides at the crossing. 'ultrasonic': /detect/level_range
+        # alone, against a threshold per stage - slow under slow_m, stop at
+        # stop_m, go once it is past clear_m. 'camera': /detect/level_bar
+        # (down/up) as detect_level reports it. full.launch sets it from
+        # level_source.
+        self.declare_parameter('level.source', 'ultrasonic')
+        self.declare_parameter('level.slow_m', 0.45)
+        self.declare_parameter('level.clear_m', 0.20)
+        # A range older than this is no range - the Pi node stopped, or the
+        # network dropped it.
+        self.declare_parameter('level.range_max_age_s', 0.5)
         self.declare_parameter('level.stop_at_bar', False)
         self.declare_parameter('level.give_up_s', 90.0)
         # Under thirty seconds, deliberately. The rules end a run when the
@@ -1208,6 +1223,7 @@ class MissionControl(Node):
         # said the same thing.
         self.bar = None
         self.bar_range = None
+        self.bar_range_at = None
         self.bar_ticks = 0
         # Ticks in a row the tunnel test has held, and whether the robot has
         # stopped steering by the lane and is driving itself in.
@@ -1361,6 +1377,7 @@ class MissionControl(Node):
     def on_bar_range(self, msg):
         """How far detect_level says the bar is, in metres (ARX)."""
         self.bar_range = msg.data
+        self.bar_range_at = self.now()
 
     def heading_ok(self, prefix=None):
         """Whether the robot is pointing a way this mission's board can be seen from."""
@@ -3205,6 +3222,32 @@ class MissionControl(Node):
             self.bar_ticks = 0
         return self.bar_ticks
 
+    def by_range(self):
+        """Whether the crossing is decided from the range alone (ARX)."""
+        return self.get_parameter('level.source').value == 'ultrasonic'
+
+    def fresh_range(self):
+        """The latest bar range, or None when there is none recent (ARX)."""
+        if self.bar_range is None or self.bar_range_at is None:
+            return None
+        if self.now() - self.bar_range_at > self.get_parameter(
+                'level.range_max_age_s').value:
+            return None
+        return self.bar_range
+
+    def range_run(self, test):
+        """Ticks in a row a fresh range has passed `test` (ARX).
+
+        The range-mode twin of bar_run, on the same counter. A tick with no
+        fresh range breaks the run - silence is not evidence either way.
+        """
+        rng = self.fresh_range()
+        if rng is not None and test(rng):
+            self.bar_ticks += 1
+        else:
+            self.bar_ticks = 0
+        return self.bar_ticks
+
     def tick_drive_to_level(self, now):
         """Carry on down the road until the crossing bar comes down (ARX).
 
@@ -3227,17 +3270,20 @@ class MissionControl(Node):
         self.set_armed(MISSION_LEVEL)
 
         need = self.get_parameter('level.confirm_ticks').value
+        slow_m = self.get_parameter('level.slow_m').value
         if not self.heading_ok('level'):
             # Pointing somewhere else - mid-curve, most likely. Whatever is
             # in front is not the bar, and the count starts again once the
             # robot is facing the road.
             self.bar_ticks = 0
-        elif self.bar_run({BAR_DOWN}) >= need:
+        elif (self.range_run(lambda r: r < slow_m) if self.by_range()
+              else self.bar_run({BAR_DOWN})) >= need:
             self.hold_heading_deg = self.yaw
             self.bar_ticks = 0
             rng = 'unknown' if self.bar_range is None else f'{self.bar_range:.2f} m'
+            where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
             self.get_logger().info(
-                f'crossing bar is down, {rng} away - creeping up to '
+                f'crossing bar is down, {rng} away, facing {where} - creeping up to '
                 f'{self.get_parameter("level.stop_m").value:.2f} m')
             self.lot_mark = self.pos
             self.go(STAGE_APPROACH_BAR, 'bar down')
@@ -3261,16 +3307,28 @@ class MissionControl(Node):
         """
         self.set_driving(True)
         self.set_armed(MISSION_LEVEL)
-        self.set_avoid(True, angular=self.hold_correction(),
-                       linear=self.get_parameter('level.speed').value)
+        if self.get_parameter('level.approach_follow_lane').value:
+            # 2026-10-18: keep following the lane, only slower - the road up
+            # to the bar is not always straight enough to hold one heading.
+            self.set_avoid(False)
+            self.set_follow_side(self.chosen_side())
+            self.max_vel_want = self.get_parameter('level.approach_max_vel').value
+        else:
+            self.set_avoid(True, angular=self.hold_correction(),
+                           linear=self.get_parameter('level.speed').value)
 
         gone = self.dist_from(self.lot_mark)
-        rng = self.bar_range
+        rng = self.fresh_range() if self.by_range() else self.bar_range
 
         # The bar lifting while the robot is still creeping is the ordinary
         # case in the simulator, where the plugin opens it at 0.30 m. It is
         # not a fault, it is the crossing letting the robot through.
-        if self.bar_run({BAR_UP, BAR_NONE}) >= self.get_parameter(
+        # By range, lifted here means the range went back out past slow_m -
+        # past clear_m would be true from the start, the creep begins near
+        # 0.45 m.
+        slow_m = self.get_parameter('level.slow_m').value
+        if (self.range_run(lambda r: r > slow_m) if self.by_range()
+                else self.bar_run({BAR_UP, BAR_NONE})) >= self.get_parameter(
                 'level.clear_ticks').value:
             self.finish_level(f'bar lifted while creeping, {gone:.2f} m in')
             return
@@ -3306,8 +3364,19 @@ class MissionControl(Node):
         self.set_avoid(True, angular=0.0, linear=0.0)
 
         need = self.get_parameter('level.clear_ticks').value
-        if self.bar_run({BAR_UP, BAR_NONE}) >= need:
-            self.finish_level(f'bar lifted after {now - self.stage_since:.0f} s')
+        if self.by_range():
+            # Standing at stop_m, the bar post and the road ahead read well
+            # past clear_m; the bar itself reads under it. Down/up by the Pi's
+            # own threshold is not used - at 0.45 it took the post for the bar.
+            clear_m = self.get_parameter('level.clear_m').value
+            run = self.range_run(lambda r: r > clear_m)
+        else:
+            run = self.bar_run({BAR_UP, BAR_NONE})
+        if run >= need:
+            rng = self.fresh_range()
+            self.finish_level(
+                f'bar lifted after {now - self.stage_since:.0f} s'
+                + (f', range {rng:.2f} m' if rng is not None else ''))
             return
 
         waited = now - self.stage_since

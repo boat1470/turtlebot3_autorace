@@ -926,10 +926,11 @@
     # 13.1 s is 0.91 m at this speed against 0.30 m to cover, so the robot
     # reaches the stop with about nine seconds in hand.
     level:
-      # ARX 2026-10-17: off for now - the run goes from parking straight on
-      # to the tunnel. skip_level:=true (launcher: "skip mission 5") does
-      # the same for one run without editing this.
-      enabled: false
+      # ARX 2026-10-18: on, read by the HC-SR04 on the robot (full.launch
+      # level_source auto -> ultrasonic with sim:=false; start "level
+      # ultrasonic" on the Pi). skip_level:=true (launcher: "skip mission 5")
+      # leaves it out for one run; false here leaves it out for good.
+      enabled: true
 
       # Only take "bar down" while facing the road the crossing is on. The
       # ultrasonic reads anything nearer than down_m as the bar, and in a
@@ -937,15 +938,34 @@
       # heading, like the sign gates; 0 is the simulator's +x, the way the
       # mission5 preset faces. MEASURE THIS ON THE REAL COURSE: bring up at
       # the start line, stand the robot in front of the bar, read the yaw.
+      # 2026-10-18: 0 on the real course too (odom, same frame as the other
+      # gates). "crossing bar is down" logs the heading it was seen at - if
+      # it reads well off 0 on the robot, move center_deg to it.
       heading:
         enabled: true
         center_deg: 0.0
-        tolerance_deg: 20.0
+        tolerance_deg: 15.0
+
+      # 2026-10-18: with the ultrasonic (level.source, set by full.launch
+      # level_source) the Pi only sends the range, /detect/level_range, and
+      # each stage here has its own threshold on it:
+      #   drive_to_level -> approach_bar   range < slow_m, confirm_ticks in a
+      #                                    row, heading in the gate above
+      #   approach_bar   -> wait_bar       range <= stop_m (slowed to
+      #                                    approach_max_vel on the lane)
+      #   wait_bar       -> on             range > clear_m, clear_ticks in a row
+      # Before, one down_m on the Pi did all three, and at 0.45 the bar post
+      # beside the robot kept reading "down" after the bar had lifted.
+      slow_m: 0.45
+      clear_m: 0.20
+      # A range older than this does not count (Pi node stopped, Wi-Fi gap).
+      range_max_age_s: 0.5
 
       # Ticks in a row before acting. Down is confirmed quickly because a
       # false stop costs a few seconds; clear is confirmed more slowly
       # because a false start drives into the bar.
-      confirm_ticks: 3
+      # 2026-10-18: 5 (was 3) - the ultrasonic's range wobbles near the bar.
+      confirm_ticks: 5
 
       # Leaving is decided on "anything other than down", not on "up".
       # detect_level alternates between up and nothing at close range -
@@ -959,9 +979,18 @@
       # ahead of the robot's own nose, so at 0.06 m the camera is already past
       # the bar. Checked - at 0.12 m and 0.06 m the frame has no red in it at
       # all.
-      stop_m: 0.30
+      #
+      # 2026-10-18: 0.10, for the HC-SR04 on the robot's front - it measures
+      # from the sensor's face and is good down to a few cm. Back to 0.30 if
+      # level_source is ever the camera again, which goes blind under 0.20.
+      stop_m: 0.10
 
       speed: 0.04
+      # 2026-10-18: up to the bar following the lane, at no more than
+      # approach_max_vel, instead of a held heading at speed (false). Stops
+      # at stop_m all the same; wait_bar then holds the robot still.
+      approach_follow_lane: true
+      approach_max_vel: 0.10
 
       # A cap on the creep. /detect/level_range is only trustworthy inside
       # about 0.50 m: further out detect_level often resolves three of the

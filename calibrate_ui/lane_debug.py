@@ -45,6 +45,11 @@ echo` terminals and an rqt_image_view:
                  LiDAR picture; under the sign line, which boxes ahead are
                  blocked, what is beside the robot and the nearest thing in
                  front - the robot's own left and right
+    crossing bar under the obstacle line: the HC-SR04's range and which of
+                 mission_control's zones it is in (level.slow_m / stop_m /
+                 clear_m from mission.yaml): far, SLOW (< slow_m), DOWN
+                 (< clear_m - wait_bar holds here), STOP (<= stop_m). With
+                 the camera detector (no range) it shows UP / DOWN instead
     batt         a small button: reads /battery_state once and shows voltage
                  and percent as of that press. It does not update by itself
     REC          records a run: `ros2 bag record` of RECORD_TOPICS into
@@ -98,6 +103,24 @@ FRONT_IMAGE = IMAGES[5][1]
 # robot's own left and right (detect_obstacle.py)
 BLOCKED_BITS = ((1, 'AHEAD'), (2, 'LEFT'), (4, 'RIGHT'))
 SIDES = {0: 'clear', 1: 'LEFT', 2: 'RIGHT'}
+# /detect/level_bar (detect_level.py / detect_level_ultrasonic.py)
+LEVEL_BAR = {0: 'nothing', 1: 'UP', 2: 'DOWN'}
+
+
+def level_thresholds():
+    """slow_m, stop_m, clear_m as mission_control has them (mission.yaml)."""
+    out = {'slow_m': 0.45, 'stop_m': 0.10, 'clear_m': 0.20}
+    try:
+        import yaml
+        from ament_index_python.packages import get_package_share_directory
+        path = os.path.join(get_package_share_directory('arx_mission'), 'param', 'mission.yaml')
+        with open(path) as f:
+            doc = yaml.safe_load(f)
+        level = next(iter(doc.values()))['ros__parameters']['level']
+        out.update({k: float(level[k]) for k in out if k in level})
+    except Exception:
+        pass
+    return out
 
 # /detect/traffic_sign and /arx/armed_mission, as mission_control numbers them
 SIGNS = {1: 'CONSTRUCTION', 2: 'LEFT', 3: 'RIGHT', 4: 'PARKING', 5: 'TUNNEL'}
@@ -144,6 +167,8 @@ class Listener(Node):
                             ('/detect/obstacle', UInt8),
                             ('/detect/obstacle_side', UInt8),
                             ('/detect/front_range', Float32),
+                            ('/detect/level_bar', UInt8),
+                            ('/detect/level_range', Float32),
                             ('/detect/lane_latency_ms', Float64)):
             self.create_subscription(
                 kind, topic, lambda msg, t=topic: self.on_value(t, msg.data), 10)
@@ -213,6 +238,7 @@ RECORD_TOPICS = (
     '/detect/yellow_line_reliability', '/detect/white_line_reliability',
     '/detect/traffic_sign', '/detect/obstacle', '/detect/obstacle_side',
     '/detect/front_range', '/arx/armed_mission', '/cmd_vel', '/odom', '/scan',
+    '/detect/level_bar', '/detect/level_range',
     '/rosout',
     # The tunnel on Nav2: who has the wheel, where AMCL put the robot, the
     # path it planned and whether collision_monitor was slowing it.
@@ -358,6 +384,10 @@ class Window:
         # It only reports while construction, parking or the tunnel is armed.
         self.obst_text = label(right, text='-', font=mono, anchor='w', justify='left')
         self.obst_text.pack(fill='x', pady=(0, 8))
+        # The crossing bar, as detect_level or detect_level_ultrasonic reports it.
+        self.level_m = level_thresholds()
+        self.level_text = label(right, text='-', font=mono, anchor='w', justify='left')
+        self.level_text.pack(fill='x', pady=(0, 8))
 
         label(right, text='lane state', fg=dim, anchor='w').pack(fill='x')
         self.state = label(right, text='-', font=big, anchor='w')
@@ -665,6 +695,33 @@ class Window:
                 text=f'obstacle: {ahead}   side: {side}   front: {rng}'
                      + ('  (stale)' if b_stale else ''),
                 fg='#777' if b_stale else '#e04040' if b else '#30b050')
+
+        # crossing bar - by range against mission_control's thresholds; the
+        # camera detector sends no range while it sees nothing, so up/down then
+        bar, bar_stale = get('/detect/level_bar')
+        brng, rng_stale = get('/detect/level_range')
+        lt = self.level_m
+        if brng is not None and brng < 9.0:
+            if brng <= lt['stop_m']:
+                zone, fg = f'STOP (<= {lt["stop_m"]:.2f})', '#e04040'
+            elif brng < lt['clear_m']:
+                zone, fg = f'DOWN (< {lt["clear_m"]:.2f})', '#e04040'
+            elif brng < lt['slow_m']:
+                zone, fg = f'SLOW (< {lt["slow_m"]:.2f})', '#e0a020'
+            else:
+                zone, fg = 'far', '#30b050'
+            self.level_text.config(
+                text=f'crossing bar: {brng:.2f} m  {zone}' + ('  (stale)' if rng_stale else ''),
+                fg='#777' if rng_stale else fg)
+        elif bar is None:
+            self.level_text.config(
+                text='crossing bar: no report - mission 5 armed? ultrasonic up?', fg='#777')
+        else:
+            state = LEVEL_BAR.get(bar, str(bar))
+            dist = '' if brng is None or brng >= 9.0 else f'  {brng:.2f} m'
+            self.level_text.config(
+                text=f'crossing bar: {state}{dist}' + ('  (stale)' if bar_stale else ''),
+                fg='#777' if bar_stale else '#e04040' if bar == 2 else '#30b050')
 
         if self.with_image:
             if frame is not None and stamp != self.shown:
