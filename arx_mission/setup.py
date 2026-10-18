@@ -17,7 +17,10 @@ setup(
         # on its declared defaults without saying anything.
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'param'), glob('param/*.yaml')),
-        (os.path.join('share', package_name, 'image'), glob('image/*')),
+        # Files only: image/frames is a local (gitignored) folder of recorded
+        # frames, and a directory here fails the whole build.
+        (os.path.join('share', package_name, 'image'),
+         [f for f in glob('image/*') if os.path.isfile(f)]),
         (os.path.join('share', package_name, 'model'), glob('model/*.sdf')),
     ],
     install_requires=['setuptools'],
