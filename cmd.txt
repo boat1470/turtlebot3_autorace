@@ -118,3 +118,32 @@ python3 calibrate_ui/roi_probe.py /camera/image_projected   วัดสีเ�
 
 
 ros2 topic echo /battery_state --once 
+
+
+
+
+
+mission 5
+
+pc
+
+ros2 topic echo /detect/level_range
+
+pi
+
+python3 ~/detect_level_ultrasonic.py --ros-args -p level.always_on:=true
+
+
+
+mission 6
+
+ros2 launch turtlebot3_cartographer cartographer.launch.py use_sim_time:=False
+ros2 run turtlebot3_teleop teleop_keyboard      # ขับช้า ๆ ผ่านอุโมงค์ไป-กลับ 1–2 รอบ
+ros2 run nav2_map_server map_saver_cli -f ~/turtlebot3_ws/src/turtlebot3_autorace/arx_mission/map/tunnel
+
+  หาจุด
+ros2 launch turtlebot3_navigation2 navigation2.launch.py use_sim_time:=False \
+  map:=$HOME/turtlebot3_ws/src/turtlebot3_autorace/arx_mission/map/tunnel.yaml
+
+debug
+ros2 run rviz2 rviz2 -d ~/turtlebot3_ws/install/turtlebot3_navigation2/share/turtlebot3_navigation2/rviz/tb3_navigation2.rviz
