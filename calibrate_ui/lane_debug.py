@@ -51,7 +51,9 @@ echo` terminals and an rqt_image_view:
                  ~/runs/<month-day_hour-minute>/, red with the time while it
                  runs, press again (or close the window) to stop. The box
                  beside it adds a line to ~/runs/notes.txt about the last run,
-                 with the folder name and how far into it the note was taken
+                 with the folder name and how far into it the note was taken.
+                 How long each stage took:
+                     python3 calibrate_ui/run_times.py [~/runs/<folder>]
 
 Topic names are the ones detect_lane.launch.py remaps to. A value turns grey
 with "stale" when nothing has arrived for a second.
@@ -212,6 +214,10 @@ RECORD_TOPICS = (
     '/detect/traffic_sign', '/detect/obstacle', '/detect/obstacle_side',
     '/detect/front_range', '/arx/armed_mission', '/cmd_vel', '/odom', '/scan',
     '/rosout',
+    # The tunnel on Nav2: who has the wheel, where AMCL put the robot, the
+    # path it planned and whether collision_monitor was slowing it.
+    '/arx/nav_active', '/arx/drive_enable', '/amcl_pose', '/plan',
+    '/collision_monitor_state',
 )
 
 
