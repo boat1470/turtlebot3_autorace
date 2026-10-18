@@ -139,9 +139,10 @@ class DetectLane(Node):
                 # white fit locked onto in the 8A turn and then followed.
                 ('lane.white_gate', True),
                 ('lane.white_gate_margin_px', 40),
-                # ARX: while steering by the yellow line alone (FOLLOW_YELLOW -
-                # not the yellow pair, which takes a wall on either side) the
-                # line followed is the left one, so a fit whose bottom lies
+                # ARX: while steering by the yellow line alone (FOLLOW_YELLOW)
+                # or the yellow pair (FOLLOW_YELLOW_PAIR, whose left wall is
+                # still the left one) the line taken as left is the left one,
+                # so a fit whose bottom lies
                 # right of the image's middle is the other yellow. Leaving the
                 # lower parking bay the arc swings the far wall into view first
                 # and the fit, searching near its last curve, stayed on it. It
@@ -309,10 +310,10 @@ class DetectLane(Node):
         if self.follow_side == FOLLOW_YELLOW_PAIR:
             self.right_yellow_fit = self.right_yellow_fitx = None
             self.lane_fit_bef['right_yellow'] = None
-        # ARX: into FOLLOW_YELLOW, start the left yellow afresh from the left
-        # half, rather than carry on a fit tracked while the robot was turning
-        # - which may by now be on the other wall.
-        if msg.data == FOLLOW_YELLOW:
+        # ARX: into FOLLOW_YELLOW or the yellow pair, start the left yellow
+        # afresh from the left half, rather than carry on a fit tracked while
+        # the robot was turning - which may by now be on the other wall.
+        if msg.data in (FOLLOW_YELLOW, FOLLOW_YELLOW_PAIR):
             self.forget_left_yellow()
         self.follow_side = msg.data
         self.get_logger().info(
@@ -593,9 +594,12 @@ class DetectLane(Node):
         if lane_fitx is None:
             lane_fitx, lane_fit = self.sliding_windown(image, left_or_right)
 
-        # ARX: see lane.yellow_left_half.
+        # ARX: see lane.yellow_left_half. The yellow pair too, since
+        # 2026-10-17: with only one wall in view the pair falls back to
+        # "left line + half a lane", and out of the 17B arc that line was the
+        # right wall - the robot steered right of it, from -90 to -114.
         if (left_or_right == 'left' and lane_fitx is not None
-                and self.follow_side == FOLLOW_YELLOW
+                and self.follow_side in (FOLLOW_YELLOW, FOLLOW_YELLOW_PAIR)
                 and self.get_parameter('lane.yellow_left_half').value):
             mid = image.shape[1] / 2
             if lane_fitx[-1] > mid and extend:

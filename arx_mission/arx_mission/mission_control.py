@@ -2644,9 +2644,13 @@ class MissionControl(Node):
 
     def hold_correction(self):
         """How hard to steer back onto the corridor heading (ARX)."""
-        if self.hold_heading_deg is None or self.yaw is None:
+        return self.correction_to(self.hold_heading_deg)
+
+    def correction_to(self, target_deg):
+        """How hard to steer onto target_deg, the lot's P term (ARX)."""
+        if target_deg is None or self.yaw is None:
             return 0.0
-        err = (self.hold_heading_deg - self.yaw + 180.0) % 360.0 - 180.0
+        err = (target_deg - self.yaw + 180.0) % 360.0 - 180.0
         cap = self.get_parameter('lot.max_angular').value
         return max(-cap, min(cap, self.get_parameter('lot.kp').value * err))
 
@@ -2684,8 +2688,22 @@ class MissionControl(Node):
             # ARX: in off parking.left_arc. The yellow pair until it is lost,
             # then the arc's heading. No slow approach, no settling.
             p = 'parking.left_arc.'
-            self.set_avoid(False)
             self.set_follow_side(FOLLOW_YELLOW_PAIR)
+            if self.lot_pair_seen:
+                self.set_avoid(False)
+            else:
+                # Not the lane until the pair is really there: odom holds the
+                # arc's end heading meanwhile. With one wall in view detect_lane
+                # falls back to a single yellow, and out of the arc that once
+                # took the right wall for the left line and turned the robot
+                # from -90 to -114 in the pair_wait_s second (run 1017_2303).
+                # A pair - two yellows a lane apart - is not fooled that way.
+                target = self.get_parameter(p + 'end_heading_deg').value
+                w = self.correction_to(target)
+                v = min(self.get_parameter('lot.speed').value,
+                        self.get_parameter('lot.wheel_max').value
+                        - abs(w) * self.get_parameter('lot.half_track').value)
+                self.set_avoid(True, angular=w, linear=max(v, 0.0))
             if self.lane_state == 2:
                 self.lot_pair_ticks += 1
                 self.lot_pair_lost = 0
