@@ -1,4 +1,4 @@
-# The level crossing bar, for arx_mission/detect_level_ultrasonic.py.
+# The level crossing bar, for arx_ultrasonic_bringup/detect_level_ultrasonic.py.
 #
 # An HC-SR04 (the 3.3 V kind) on the front of the robot, facing forward, wired
 # straight to the Pi:

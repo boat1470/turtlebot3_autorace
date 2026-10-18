@@ -13,7 +13,7 @@ sim:=false (or level_source:=ultrasonic).
 It stays idle until mission_control arms it on /arx/armed_mission.
 always_on:=true measures regardless, which is how to check the wiring:
 
-    ros2 launch arx_mission level_ultrasonic.launch.py always_on:=true
+    ros2 launch arx_ultrasonic_bringup ultrasonic.launch.py always_on:=true
     ros2 topic echo /detect/level_range
 """
 
@@ -29,7 +29,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
     param_file = os.path.join(
-        get_package_share_directory('arx_mission'), 'param', 'level_ultrasonic.yaml')
+        get_package_share_directory('arx_ultrasonic_bringup'), 'param', 'ultrasonic.yaml')
 
     always_on = LaunchConfiguration('always_on')
 
@@ -41,7 +41,7 @@ def generate_launch_description():
     ]
 
     node = Node(
-        package='arx_mission',
+        package='arx_ultrasonic_bringup',
         executable='detect_level_ultrasonic',
         name='arx_detect_level_ultrasonic',
         output='screen',

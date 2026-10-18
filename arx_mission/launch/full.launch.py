@@ -33,7 +33,7 @@ Arguments:
                         what reports the crossing bar. Defaults to camera in
                         the simulator and ultrasonic without it; the
                         ultrasonic node runs on the Pi and is started there
-                        (level_ultrasonic.launch.py), this only keeps the
+                        (arx_ultrasonic_bringup), this only keeps the
                         camera one off
     skip_level:=true    leave out the level crossing and go straight on to
                         the tunnel
@@ -327,7 +327,7 @@ def stack(context, *unused_args, **unused_kwargs):
 
     # ARX: which detector reports the crossing bar. Only one may run - both
     # publish /detect/level_bar. The ultrasonic one is wired to the Pi's GPIO,
-    # so it is started on the Pi (level_ultrasonic.launch.py, its own button in
+    # so it is started on the Pi (arx_ultrasonic_bringup ultrasonic.launch.py, its own button in
     # the launcher), not here; choosing it only keeps the camera one off.
     # ARX: Nav2 for the tunnel (nav.launch.py), up from the start so it is
     # ready when the robot reaches the front. Off in the simulator by default:

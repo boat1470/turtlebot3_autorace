@@ -77,7 +77,7 @@ COMMANDS = (
     ('pi', 'robot', 'robot bringup',
      'ros2 launch turtlebot3_bringup robot.launch.py'),
     ('pi', 'sonar', 'level ultrasonic',
-     'ros2 launch arx_mission level_ultrasonic.launch.py'),
+     'ros2 launch arx_ultrasonic_bringup ultrasonic.launch.py'),
     ('calibration', 'intr', 'intrinsic calibration',
      'ros2 launch turtlebot3_autorace_camera intrinsic_camera_calibration.launch.py'),
     ('calibration', 'extr', 'extrinsic calibration',

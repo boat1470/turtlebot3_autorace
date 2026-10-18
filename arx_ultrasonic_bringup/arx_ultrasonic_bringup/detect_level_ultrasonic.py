@@ -39,7 +39,7 @@ busy Pi misses edges by enough to be off by centimetres.
 Like every detector here it idles until mission_control arms mission 5. To
 look at the reading on its own:
 
-    ros2 launch arx_mission level_ultrasonic.launch.py always_on:=true
+    ros2 launch arx_ultrasonic_bringup ultrasonic.launch.py always_on:=true
     ros2 topic echo /detect/level_range
 """
 
