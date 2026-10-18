@@ -27,6 +27,7 @@
   <!-- detect_intersection_sign reads left.png and right.png from this
        package's share/image directory rather than holding its own copy. -->
   <exec_depend>turtlebot3_autorace_detect</exec_depend>
+  <exec_depend>python3-lgpio</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

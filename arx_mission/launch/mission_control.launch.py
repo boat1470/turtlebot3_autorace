@@ -46,6 +46,7 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     start_stage = LaunchConfiguration('start_stage')
     spawn_yaw_deg = LaunchConfiguration('spawn_yaw_deg')
+    skip_level = LaunchConfiguration('skip_level')
 
     args = [
         DeclareLaunchArgument(
@@ -67,6 +68,10 @@ def generate_launch_description():
                         'starts at zero whatever pose the model is in, so a '
                         'preset that faces anything but +x has to say so or '
                         'every heading gate is out by that much.'),
+        DeclareLaunchArgument(
+            'skip_level', default_value='false',
+            description='Leave out the level crossing (mission 5) and go '
+                        'straight on to the tunnel.'),
     ]
 
     mission_control = Node(
@@ -86,6 +91,7 @@ def generate_launch_description():
             # person inherits it without knowing.
             {'start_stage': ParameterValue(start_stage, value_type=str)},
             {'spawn_yaw_deg': ParameterValue(spawn_yaw_deg, value_type=float)},
+            {'skip_level': ParameterValue(skip_level, value_type=bool)},
         ],
     )
 

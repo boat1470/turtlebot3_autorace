@@ -926,7 +926,21 @@
     # 13.1 s is 0.91 m at this speed against 0.30 m to cover, so the robot
     # reaches the stop with about nine seconds in hand.
     level:
-      enabled: true
+      # ARX 2026-10-17: off for now - the run goes from parking straight on
+      # to the tunnel. skip_level:=true (launcher: "skip mission 5") does
+      # the same for one run without editing this.
+      enabled: false
+
+      # Only take "bar down" while facing the road the crossing is on. The
+      # ultrasonic reads anything nearer than down_m as the bar, and in a
+      # curve that is the wall at the side of the road. Absolute odom
+      # heading, like the sign gates; 0 is the simulator's +x, the way the
+      # mission5 preset faces. MEASURE THIS ON THE REAL COURSE: bring up at
+      # the start line, stand the robot in front of the bar, read the yaw.
+      heading:
+        enabled: true
+        center_deg: 0.0
+        tolerance_deg: 20.0
 
       # Ticks in a row before acting. Down is confirmed quickly because a
       # false stop costs a few seconds; clear is confirmed more slowly

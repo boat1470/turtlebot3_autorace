@@ -861,6 +861,11 @@ class MissionControl(Node):
         # so the robot reaches the stop with about nine seconds to spare.
         self.declare_parameter('level.enabled', True)
         self.declare_parameter('level.confirm_ticks', 3)
+        # Only count "down" while facing the crossing's road - see heading_ok.
+        # Range alone cannot tell the bar from a wall met in a curve.
+        self.declare_parameter('level.heading.enabled', True)
+        self.declare_parameter('level.heading.center_deg', 0.0)
+        self.declare_parameter('level.heading.tolerance_deg', 20.0)
         # Not UP, but "anything other than DOWN". detect_level alternates
         # between up and nothing at close range - measured - and both mean the
         # road is clear. Waiting for a run of UP alone can stall on that
@@ -988,6 +993,11 @@ class MissionControl(Node):
         # The robot still has to be standing somewhere that stage makes sense
         # from. full.launch.py's `start` argument sets the two together.
         self.declare_parameter('start_stage', STAGE_WAIT_GREEN)
+        # Skip the level crossing and go straight on to the tunnel (ARX). Set
+        # from the command line like start_stage, not in mission.yaml, for the
+        # same reason: a run that leaves a mission out is decided for that run.
+        # level.enabled: false does the same thing from the file.
+        self.declare_parameter('skip_level', False)
 
         self.stage = self.get_parameter('start_stage').value
         if self.stage not in STAGES:
@@ -3055,10 +3065,10 @@ class MissionControl(Node):
         # returns it whenever the junction never picked a line, which is the
         # case on any run that reaches the parking lot - so there is nothing
         # to set.
-        if self.get_parameter('level.enabled').value:
-            self.go(STAGE_DRIVE_TO_LEVEL, f'{why} - on to the level crossing')
-        else:
-            self.go(STAGE_FOLLOW_SIDE, why)
+        # Always by way of drive_to_level, even with the crossing switched
+        # off: that stage is where the switch is read, so a run started at
+        # the mission5 preset skips it the same way a full run does.
+        self.go(STAGE_DRIVE_TO_LEVEL, f'{why} - on to the level crossing')
 
     def bar_run(self, wanted):
         """How many ticks in a row the bar report has matched (ARX).
@@ -3082,13 +3092,26 @@ class MissionControl(Node):
         the bar itself is the thing that has to be obeyed, and it is visible
         from 0.60 m which is further than the board is useful from.
         """
+        if (not self.get_parameter('level.enabled').value
+                or self.get_parameter('skip_level').value):
+            # finish_level goes on to the tunnel, or back to following the
+            # road if that is switched off too. Ending in follow_side here
+            # used to mean a skipped crossing skipped the tunnel as well.
+            self.finish_level('level crossing disabled')
+            return
+
         self.set_driving(True)
         self.set_avoid(False)
         self.set_follow_side(self.chosen_side())
         self.set_armed(MISSION_LEVEL)
 
         need = self.get_parameter('level.confirm_ticks').value
-        if self.bar_run({BAR_DOWN}) >= need:
+        if not self.heading_ok('level'):
+            # Pointing somewhere else - mid-curve, most likely. Whatever is
+            # in front is not the bar, and the count starts again once the
+            # robot is facing the road.
+            self.bar_ticks = 0
+        elif self.bar_run({BAR_DOWN}) >= need:
             self.hold_heading_deg = self.yaw
             self.bar_ticks = 0
             rng = 'unknown' if self.bar_range is None else f'{self.bar_range:.2f} m'

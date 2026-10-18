@@ -1,0 +1,45 @@
+# The level crossing bar, for arx_mission/detect_level_ultrasonic.py.
+#
+# An HC-SR04 (the 3.3 V kind) on the front of the robot, facing forward, wired
+# straight to the Pi:
+#
+#   VCC   3.3 V   pin 1
+#   Trig  GPIO23  pin 16
+#   Echo  GPIO24  pin 18
+#   GND   GND     pin 6
+#
+# Mount it at the height of the bar when it is down, so the beam hits the
+# arm and not the gap under or over it. The robot stops level.stop_m (0.30 m,
+# mission.yaml) short of the bar, and the bar's own sensor lifts it only for
+# something within 20 cm of IT - so stand that sensor where the robot's stop
+# point is inside its 20 cm, or the robot waits the full 25 s for nothing.
+/**:
+  ros__parameters:
+    level:
+      ultrasonic:
+        # /dev/gpiochipN. 0 on a Pi 4, and on a Pi 5 with a current kernel;
+        # older Pi 5 kernels put the header on 4.
+        gpio_chip: 0
+        trig_pin: 23
+        echo_pin: 24
+
+        # One ping per tick. Above about 25 Hz a ping can still be echoing
+        # when the next goes out.
+        rate_hz: 15.0
+
+        # Nearer than this, the bar is down. Further out than mission
+        # control's 0.30 m stop so it has something to creep towards, and
+        # inside the 0.60 m it is allowed to creep (level.max_creep_m).
+        down_m: 0.45
+
+        # No echo, or further than this, reads as this.
+        max_m: 2.0
+
+        # Readings the median is taken over. A single lost echo reads as far
+        # away - "up" - and five in a row of up let the robot go, so this has
+        # to be large enough that one bad ping cannot move it.
+        window: 5
+
+      # Measure without waiting for mission_control to arm mission 5. For
+      # looking at the reading only - not for a run.
+      always_on: false

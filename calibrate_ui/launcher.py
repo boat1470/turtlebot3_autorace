@@ -9,8 +9,10 @@
 
 Two groups of buttons, one per command:
 
-  Pi           camera and robot bringup, each on its own button, run on the
-               Pi over ssh
+  Pi           camera, robot bringup and the level crossing ultrasonic,
+               each on its own button, run on the Pi over ssh. The
+               ultrasonic is what full.launch reads the bar from with
+               sim:=false, so start it before mission 5 is reached
   calibration  intrinsic, extrinsic and rqt_reconfigure, run here. Button 1
                (or the 1 key) starts all three at once, and stops them all
                while any is running
@@ -74,6 +76,8 @@ COMMANDS = (
      'ros2 launch arx_camera_bringup camera.launch.py'),
     ('pi', 'robot', 'robot bringup',
      'ros2 launch turtlebot3_bringup robot.launch.py'),
+    ('pi', 'sonar', 'level ultrasonic',
+     'ros2 launch arx_mission level_ultrasonic.launch.py'),
     ('calibration', 'intr', 'intrinsic calibration',
      'ros2 launch turtlebot3_autorace_camera intrinsic_camera_calibration.launch.py'),
     ('calibration', 'extr', 'extrinsic calibration',
@@ -89,6 +93,7 @@ COMMANDS = (
 FULL_LAUNCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
                            'arx_mission', 'launch', 'full.launch.py')
 MISSION_CMD = 'ros2 launch arx_mission full.launch.py sim:=false start:={}'
+SKIP_LEVEL = ' skip_level:=true'
 
 
 def presets():
@@ -435,7 +440,8 @@ class Window:
         # calibration group first - two of each fight over the same topics.
         names = presets()
         self.preset = tk.StringVar(value='mission4' if 'mission4' in names else names[0])
-        self.mission = Job('run', 'full.launch', MISSION_CMD.format(self.preset.get()), self.out)
+        self.skip_level = tk.BooleanVar(value=False)
+        self.mission = Job('run', 'full.launch', self.mission_command(), self.out)
         self.jobs.append(self.mission)
         box = group('mission  (this PC)', [self.mission])
         # The one button a run is started from, so it is the big one: green
@@ -456,6 +462,9 @@ class Window:
         self.mission_cmd = ttk.Label(box, text=self.mission.shown, foreground='#777')
         self.mission_cmd.grid(row=1, column=4, padx=8, sticky='w')
         self.preset.trace_add('write', lambda *a: self.pick_preset())
+        tk.Checkbutton(box, text='skip mission 5 (level crossing) - straight on to the tunnel',
+                       variable=self.skip_level,
+                       command=self.pick_preset).grid(row=2, column=0, columnspan=5, sticky='w')
         self.rows.append((self.mission, None, st, led))
         self.mission_pending = False
         self.paint_mission_button()
@@ -492,11 +501,16 @@ class Window:
                 text=f'\u25b6  2  START  {self.preset.get()}',
                 bg='#1e8449', activebackground='#27ae60')
 
+    def mission_command(self):
+        """full.launch for the chosen preset, with mission 5 left out if asked."""
+        cmd = MISSION_CMD.format(self.preset.get())
+        return cmd + SKIP_LEVEL if self.skip_level.get() else cmd
+
     def pick_preset(self):
         """Point the mission job at the chosen preset - not while it runs."""
         if self.mission.running():
             return
-        cmd = MISSION_CMD.format(self.preset.get())
+        cmd = self.mission_command()
         self.mission.command = self.mission.shown = cmd
         self.mission.argv = shlex.split(cmd)
         self.mission_cmd.config(text=cmd)

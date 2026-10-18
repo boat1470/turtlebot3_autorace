@@ -37,6 +37,7 @@ setup(
             'detect_lane = arx_mission.detect_lane:main',
             'detect_obstacle = arx_mission.detect_obstacle:main',
             'detect_level = arx_mission.detect_level:main',
+            'detect_level_ultrasonic = arx_mission.detect_level_ultrasonic:main',
             'detect_traffic_light = arx_mission.detect_traffic_light:main',
             'mission_control = arx_mission.mission_control:main',
         ],

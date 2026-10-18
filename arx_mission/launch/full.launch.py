@@ -29,6 +29,14 @@ Arguments:
                         rqt_reconfigure works - this package's detectors
                         register their parameter callbacks in every mode.
     debug_image:=true   publish the lane mask images
+    level_source:=camera|ultrasonic
+                        what reports the crossing bar. Defaults to camera in
+                        the simulator and ultrasonic without it; the
+                        ultrasonic node runs on the Pi and is started there
+                        (level_ultrasonic.launch.py), this only keeps the
+                        camera one off
+    skip_level:=true    leave out the level crossing and go straight on to
+                        the tunnel
 
 Stages are separated by TimerAction because each one needs the topic the
 previous one publishes: the camera pipeline has nothing to rectify until the
@@ -315,6 +323,18 @@ def stack(context, *unused_args, **unused_kwargs):
     calibration = LaunchConfiguration('calibration')
     debug_image = LaunchConfiguration('debug_image')
 
+    # ARX: which detector reports the crossing bar. Only one may run - both
+    # publish /detect/level_bar. The ultrasonic one is wired to the Pi's GPIO,
+    # so it is started on the Pi (level_ultrasonic.launch.py, its own button in
+    # the launcher), not here; choosing it only keeps the camera one off.
+    level_source = LaunchConfiguration('level_source').perform(context)
+    if level_source == 'auto':
+        level_source = 'camera' if is_sim else 'ultrasonic'
+    if level_source not in ('camera', 'ultrasonic'):
+        raise RuntimeError(
+            f'level_source:={level_source} is not a source. '
+            f'Known: auto, camera, ultrasonic')
+
     simulator = include('turtlebot3_gazebo', 'turtlebot3_autorace_2020.launch.py',
                         condition=IfCondition(sim))
 
@@ -337,6 +357,7 @@ def stack(context, *unused_args, **unused_kwargs):
         include('arx_mission', 'mission_control.launch.py',
                 start_stage=preset['stage'],
                 spawn_yaw_deg=preset['yaw'],
+                skip_level=LaunchConfiguration('skip_level'),
                 use_sim_time=use_sim_time),
         # Both detectors idle until mission_control arms them, so their
         # position in the order only has to be after the camera pipeline.
@@ -344,7 +365,8 @@ def stack(context, *unused_args, **unused_kwargs):
                 use_sim_time=use_sim_time),
         include('arx_mission', 'detect_sign.launch.py'),
         include('arx_mission', 'detect_obstacle.launch.py'),
-        include('arx_mission', 'detect_level.launch.py'),
+        *([include('arx_mission', 'detect_level.launch.py')]
+          if level_source == 'camera' else []),
     ]
 
     # The sequencer still comes up before control_lane. It no longer has to -
@@ -435,5 +457,15 @@ def generate_launch_description():
                               description='detect_lane in calibration mode.'),
         DeclareLaunchArgument('debug_image', default_value='false',
                               description='Publish the lane mask images.'),
+        DeclareLaunchArgument('level_source', default_value='auto',
+                              description='What reports the crossing bar: '
+                                          'camera, ultrasonic (on the Pi, '
+                                          'started separately), or auto - '
+                                          'camera with sim:=true, ultrasonic '
+                                          'without.'),
+        DeclareLaunchArgument('skip_level', default_value='false',
+                              description='Leave out the level crossing '
+                                          '(mission 5) and go straight on to '
+                                          'the tunnel.'),
     ]
     return LaunchDescription(args + [OpaqueFunction(function=stack)])
