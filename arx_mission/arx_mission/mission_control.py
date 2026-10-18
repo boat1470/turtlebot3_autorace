@@ -70,10 +70,11 @@ SIGN_RIGHT = 3
 # parking sign is also 1 and collides with the construction board. One node
 # reading them all cannot have that, so parking gets the next free number.
 SIGN_PARKING = 4
+SIGN_TUNNEL = 5
 
 SIGN_NAMES = {SIGN_CONSTRUCTION: 'construction',
               SIGN_LEFT: 'left', SIGN_RIGHT: 'right',
-              SIGN_PARKING: 'parking'}
+              SIGN_PARKING: 'parking', SIGN_TUNNEL: 'tunnel'}
 
 # /arx/follow_side - must match detect_lane.py. Which lane line detect_lane
 # should steer by once the junction has been decided: the yellow one on the
@@ -933,13 +934,28 @@ class MissionControl(Node):
         # It is the same mistake the construction stage made once, and every
         # sign hunt in this file has carried a heading gate since.
         #
-        # The lane runs along y at this end of the course and the robot
-        # arrives travelling -y, so -90.
+        # ARX 2026-10-17: the front of the tunnel is now the tunnel board,
+        # seen big enough (sign.tunnel.min_width_px) while facing -90 +/- 30 -
+        # measured on the real course at -88.5. The gate is applied to the
+        # sign reports in on_sign, like every other sign hunt.
         self.declare_parameter('tunnel.heading.enabled', True)
         self.declare_parameter('tunnel.heading.center_deg', -90.0)
-        self.declare_parameter('tunnel.heading.tolerance_deg', 45.0)
-        self.declare_parameter('tunnel.enter_m', 0.20)
-        self.declare_parameter('tunnel.enter_ticks', 3)
+        self.declare_parameter('tunnel.heading.tolerance_deg', 30.0)
+        self.declare_parameter('tunnel.confirm_votes', 3)
+        # Stop at the front of the tunnel instead of going in. For now, until
+        # what to do inside is decided. The front is two things in order: the
+        # board confirmed, and after it something within stop_ahead_m ahead
+        # on the LiDAR. Something that close before the board does not count.
+        self.declare_parameter('tunnel.stop_at_sign', True)
+        self.declare_parameter('tunnel.stop_ahead_m', 0.25)
+        # Readings in a row - /detect/front_range jumps for a scan now and
+        # then (0.437 -> 0.242 -> 0.534 in one run), and one is not a wall.
+        self.declare_parameter('tunnel.stop_ahead_ticks', 2)
+        # Speed ceiling between the board and the stop. At 0.2 m/s the robot
+        # covers 2 cm a tick and more between scans, so it would stop well
+        # inside 0.15 m.
+        self.declare_parameter('tunnel.after_sign_max_vel', 0.08)
+        self.declare_parameter('tunnel.vote_max_age_s', 3.0)
         self.declare_parameter('tunnel.speed', 0.04)
         # Both walls at once, not the right one alone. The right is the
         # steadier of the two - a flat 0.120 m over sixty beams from the mouth
@@ -1149,7 +1165,8 @@ class MissionControl(Node):
         # stopped steering by the lane and is driving itself in.
         self.tunnel_ticks = 0
         self.tunnel_going_in = False
-        self.tunnel_rejected = 0
+        # The tunnel board has been confirmed; now waiting for the front.
+        self.tunnel_sign_seen = False
         self.front_range = None
         # Backing into the bay: which phase, which way round, and the marks
         # each phase measures from.
@@ -1301,8 +1318,9 @@ class MissionControl(Node):
                     f'facing {where} - sign reports now counted '
                     f'({self.sign_rejected} ignored so far)')
             else:
-                want = self.get_parameter('intersection.heading.center_deg').value
-                tol = self.get_parameter('intersection.heading.tolerance_deg').value
+                prefix = self.sign_prefix()
+                want = self.get_parameter(f'{prefix}.heading.center_deg').value
+                tol = self.get_parameter(f'{prefix}.heading.tolerance_deg').value
                 self.get_logger().info(
                     f'facing {where} - sign reports ignored, '
                     f'want {want:+.0f}+/-{tol:.0f}')
@@ -1317,6 +1335,8 @@ class MissionControl(Node):
             return 'construction'
         if self.stage == STAGE_DRIVE_TO_PARKING:
             return 'parking'
+        if self.stage == STAGE_DRIVE_TO_TUNNEL:
+            return 'tunnel'
         return 'intersection'
 
     def reset_votes(self):
@@ -3206,6 +3226,10 @@ class MissionControl(Node):
         self.set_armed(MISSION_NONE)
         self.get_logger().info(f'level crossing done: {why}')
         if self.get_parameter('tunnel.enabled').value:
+            # The tunnel is a sign hunt now: start it with an empty box.
+            self.reset_votes()
+            self.tunnel_sign_seen = False
+            self.tunnel_ticks = 0
             self.go(STAGE_DRIVE_TO_TUNNEL, f'{why} - on to the tunnel')
         else:
             self.go(STAGE_FOLLOW_SIDE, why)
@@ -3215,9 +3239,15 @@ class MissionControl(Node):
 
         Two parts, because the lane runs out before the tunnel does.
 
-            follow the lane, watching the wide wedge ahead
-            something inside 0.20 m -> hold that heading and go straight in
-            the right-hand wall alongside -> stop
+            follow the lane, watching for the tunnel board
+            the board, big enough, facing -90 +/- 30 -> hold that heading and
+                go straight in
+            walls alongside -> stop
+
+        The front of the tunnel used to be read off the LiDAR - something
+        inside 0.20 m ahead. On the real course it is the board in front of
+        it, and only once it looks big (sign.tunnel.min_width_px), which is
+        what says the robot has arrived rather than merely seen it.
 
         The walls come with the course. tunnel_wall is defined inline in
         turtlebot3_autorace_2020.world rather than through an include, which
@@ -3227,48 +3257,63 @@ class MissionControl(Node):
         condition this mission is about - and the reason the heading has to be
         taken while there is still a line to take it from.
 
-        Entry is read off the LiDAR rather than an upward range finder. A
-        sensor has to live inside the robot's model, that model belongs to the
-        example, and gz's DetachableJoint has to be declared in the parent
-        model as well, so adding one would mean forking the robot and both of
-        its launch files. The LiDAR answers the same question with nothing
-        forked, and without depending on the light.
+        Being inside is still read off the LiDAR rather than an upward range
+        finder. A sensor has to live inside the robot's model, that model
+        belongs to the example, and gz's DetachableJoint has to be declared in
+        the parent model as well, so adding one would mean forking the robot
+        and both of its launch files.
         """
         self.set_driving(True)
         self.set_armed(MISSION_TUNNEL)
 
-        # Nothing here counts unless the robot is pointing the way the mouth
-        # can be entered from. Checked in both parts, not just the first: the
-        # heading is held through the second, so if it was wrong going in it
-        # is wrong coming to the wall as well.
+        # Checked in the second part as well: the heading is held through
+        # it, so if it was wrong going in it is wrong coming to the wall too.
         facing = self.heading_ok('tunnel')
 
         if not self.tunnel_going_in:
+            # Follow the lane until the tunnel board has been seen, big
+            # enough and while facing the right way - detect_sign drops it
+            # while it is small, on_sign while the heading is off. That is
+            # the front of the tunnel.
             self.set_avoid(False)
             self.set_follow_side(self.chosen_side())
-            near = self.get_parameter('tunnel.enter_m').value
-            close = self.front_range is not None and self.front_range <= near
-            if close and not facing:
-                self.tunnel_rejected += 1
-                if self.tunnel_rejected == 1:
-                    where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
-                    want = self.get_parameter('tunnel.heading.center_deg').value
-                    tol = self.get_parameter('tunnel.heading.tolerance_deg').value
-                    self.get_logger().info(
-                        f'something {self.front_range:.2f} m ahead but facing '
-                        f'{where}, want {want:+.0f}+/-{tol:.0f} - not the tunnel')
-            if close and facing:
-                self.tunnel_ticks += 1
-                if self.tunnel_ticks >= self.get_parameter('tunnel.enter_ticks').value:
-                    self.tunnel_going_in = True
+            where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+            stop_at_front = self.get_parameter('tunnel.stop_at_sign').value
+
+            if self.tunnel_sign_seen:
+                # Second condition: keep following the lane, slowly, until
+                # something is right in front.
+                self.max_vel_want = self.get_parameter('tunnel.after_sign_max_vel').value
+                near = self.get_parameter('tunnel.stop_ahead_m').value
+                if self.front_range is not None and self.front_range <= near:
+                    self.tunnel_ticks += 1
+                    if self.tunnel_ticks >= self.get_parameter('tunnel.stop_ahead_ticks').value:
+                        self.get_logger().info(
+                            f'{self.front_range:.2f} m ahead after the tunnel sign - '
+                            f'at the tunnel front, facing {where}')
+                        self.stop('at the tunnel front - stopping here, as asked')
+                        return
+                else:
                     self.tunnel_ticks = 0
-                    self.hold_heading_deg = self.yaw
-                    where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
-                    self.get_logger().info(
-                        f'the tunnel mouth is {self.front_range:.2f} m ahead - '
-                        f'holding {where} and going straight in')
+                winner = None
             else:
+                winner, votes = self.sign_majority({SIGN_TUNNEL})
+
+            if winner == SIGN_TUNNEL and stop_at_front:
+                self.tunnel_sign_seen = True
                 self.tunnel_ticks = 0
+                self.get_logger().info(
+                    f'tunnel sign, {votes} votes, facing {where} - driving on '
+                    f'until something is within '
+                    f'{self.get_parameter("tunnel.stop_ahead_m").value:.2f} m ahead')
+            elif winner == SIGN_TUNNEL:
+                self.tunnel_going_in = True
+                self.tunnel_ticks = 0
+                self.hold_heading_deg = self.yaw
+                where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+                self.get_logger().info(
+                    f'tunnel sign, {votes} votes - at the tunnel front, '
+                    f'holding {where} and going straight in')
         else:
             # No line left to steer by under the roof, so hold the heading the
             # lane gave and creep.
@@ -3298,13 +3343,19 @@ class MissionControl(Node):
 
         waited = now - self.stage_since
         if waited > self.get_parameter('tunnel.give_up_s').value:
-            state = ('never found the mouth' if not self.tunnel_going_in
-                     else 'went in and never found the walls')
+            if self.tunnel_sign_seen:
+                state = (f'saw the tunnel sign, but nothing came within '
+                         f'{self.get_parameter("tunnel.stop_ahead_m").value:.2f} m ahead')
+            elif not self.tunnel_going_in:
+                state = 'never saw the tunnel sign'
+            else:
+                state = 'went in and never found the walls'
             yaw = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
             self.get_logger().warn(
                 f'not in the tunnel after {waited:.0f} s ({state}, '
                 f'ahead {self.front_range}, side {self.side}, facing {yaw}, '
-                f'{self.tunnel_rejected} ignored on heading) - carrying on')
+                f'{self.sign_msgs} sign reports, {self.sign_rejected} ignored '
+                f'on heading) - carrying on')
             self.set_avoid(True, angular=0.0, linear=0.0)
             self.set_avoid(False)
             self.go(STAGE_FOLLOW_SIDE, 'gave up on the tunnel')

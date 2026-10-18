@@ -1021,42 +1021,35 @@
     tunnel:
       enabled: true
 
-      # Which way the robot has to be pointing for any of this to count.
+      # The front of the tunnel is the tunnel board (sign.yaml `tunnel`),
+      # seen big enough - sign.tunnel.min_width_px - while facing this way.
+      # It used to be the LiDAR, something inside 0.20 m ahead; on the real
+      # course the board is the clearer mark.
       #
-      # Without it the test is "something inside 0.20 m ahead, then something
-      # on the right", and that is true in a great many places. A run came
-      # through mission 5 and called the tunnel while facing +0.7 degrees -
-      # travelling +x, on the level crossing road, ninety degrees off the only
-      # heading the mouth can be entered from. Two other things in that log
-      # said the same: the range ahead jumped from 0.175 m to 1.448 m, which
-      # is passing something rather than entering anything, and the left side
-      # reported nothing at all where the mouth gives 0.176 m.
-      #
-      # The stop board at (-1.35, 1.04) sits about 0.21 m off that line on the
-      # right, which fits what the scan reported.
-      #
-      # It is the same mistake the construction stage made once, and every
-      # sign hunt in this file has carried a heading gate since. The lane runs
-      # along y at this end of the course and the robot arrives travelling -y,
-      # so -90.
+      # Absolute odom heading, as for the other sign hunts. Measured on the
+      # real course 2026-10-17: a run from mission4 (parking_17b, +180 on
+      # odom - the same frame as a full run) reached the board facing -88.5.
+      # +90 was tried first and threw away every report of the board.
       heading:
         enabled: true
         center_deg: -90.0
-        tolerance_deg: 45.0
+        tolerance_deg: 30.0
 
-      # Stop steering by the lane when something comes inside this, in the
-      # wide wedge ahead on /detect/front_range.
-      #
-      # The lane runs out before the tunnel does: under the roof there is no
-      # paint at all. So the last useful thing to do while there is still a
-      # line is to take the heading it was holding and carry that in, which is
-      # the same move the parking lot and the level crossing both make.
-      #
-      # The wedge is 45 degrees either side, set in obstacle.yaml. It has to
-      # be wide because the walls that mark the mouth stand off to both sides
-      # of the gap the robot is aiming at, not square in front of it.
-      enter_m: 0.20
-      enter_ticks: 3
+      # Reports of the board needed inside vote_max_age_s.
+      confirm_votes: 3
+      vote_max_age_s: 3.0
+
+      # ARX 2026-10-17: stop at the front of the tunnel for now - the run
+      # ends there. The front is BOTH, in this order: the board confirmed,
+      # then something within stop_ahead_m on /detect/front_range. Close
+      # before the board does not count. false carries on the old way: hold
+      # the heading at the board and creep in until the walls.
+      stop_at_sign: true
+      stop_ahead_m: 0.25
+      stop_ahead_ticks: 2
+      # Speed ceiling from the board to the stop, so a 0.15 m stop is not
+      # overshot between scans.
+      after_sign_max_vel: 0.08
 
       speed: 0.04
 

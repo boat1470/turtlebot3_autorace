@@ -185,6 +185,10 @@ class DetectObstacle(Node):
         self.pub_front = self.create_publisher(Float32, '/detect/front_range', 10)
         self.pub_image = self.create_publisher(
             CompressedImage, '/detect/image_output/compressed', 10)
+        # ARX: what /detect/front_range and /detect/obstacle_side are read
+        # from, drawn - the picture above shows only the three boxes.
+        self.pub_image_front = self.create_publisher(
+            CompressedImage, '/detect/image_front/compressed', 10)
 
         self.bridge = CvBridge()
         self.get_logger().info('DetectObstacle Node Initialized')
@@ -258,6 +262,7 @@ class DetectObstacle(Node):
 
         if self.get_parameter('obstacle.publish_debug_image').value:
             self.fnPublishImage(points, blocked)
+            self.fnPublishFrontImage(msg, front)
 
     def convert_laserscan_to_points(self, msg):
         angles = np.linspace(msg.angle_min, msg.angle_max, len(msg.ranges))
@@ -394,6 +399,72 @@ class DetectObstacle(Node):
         if blocked & BLOCKED_RIGHT:
             sides.append('right')
         return ' and '.join(sides)
+
+    def fnPublishFrontImage(self, msg, front):
+        """The scan as front_range and the side wedges see it (ARX).
+
+        Straight ahead is up, the robot's left is left. Every return is a grey
+        dot; the ones inside the front wedge are yellow, and the nearest of
+        them - the number on /detect/front_range - is red with a line to it.
+        The side wedges are drawn in blue with their nearest return. Distances
+        are from the LiDAR's centre, which is the centre of the blue box, not
+        the robot's nose.
+        """
+        size, scale = 500, 300.0          # 1 m = 300 px
+        cx, cy = size // 2, int(size * 0.62)
+        img = np.zeros((size, size, 3), dtype=np.uint8)
+
+        def px(r, deg):
+            a = np.radians(deg)
+            return (int(cx - r * np.sin(a) * scale), int(cy - r * np.cos(a) * scale))
+
+        for r in (0.25, 0.5, 1.0):
+            cv2.circle(img, (cx, cy), int(r * scale), (70, 70, 70), 1)
+            cv2.putText(img, f'{r:.2f}', (cx + 3, cy - int(r * scale) - 3),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (110, 110, 110), 1)
+
+        rw, rl = int(0.138 * scale), int(0.178 * scale)
+        cv2.rectangle(img, (cx - rw // 2, cy - rl // 2), (cx + rw // 2, cy + rl // 2),
+                      (255, 0, 0), 2)
+
+        front_half = self.get_parameter('obstacle.front_angle_deg').value
+        side_half = self.get_parameter('obstacle.side_angle_deg').value
+        reach = 2.0
+        for d in (-front_half, front_half):
+            cv2.line(img, (cx, cy), px(reach, d), (0, 200, 255), 1)
+        for centre in (90.0, -90.0):
+            for d in (centre - side_half, centre + side_half):
+                cv2.line(img, (cx, cy), px(self.get_parameter('obstacle.side_distance').value, d),
+                         (200, 120, 0), 1)
+
+        n = len(msg.ranges)
+        if n:
+            ranges = np.array(msg.ranges)
+            deg = (np.degrees(np.linspace(msg.angle_min, msg.angle_max, n)) + 180.0) % 360.0 - 180.0
+            ok = (ranges >= msg.range_min) & (ranges <= msg.range_max)
+            in_front = ok & (np.abs(deg) <= front_half)
+            for r, d, f in zip(ranges[ok], deg[ok], in_front[ok]):
+                cv2.circle(img, px(r, d), 2 if f else 1,
+                           (0, 230, 255) if f else (150, 150, 150), -1)
+            if np.any(in_front):
+                i = np.flatnonzero(in_front)[np.argmin(ranges[in_front])]
+                p = px(ranges[i], deg[i])
+                cv2.line(img, (cx, cy), p, (0, 0, 255), 2)
+                cv2.circle(img, p, 6, (0, 0, 255), 2)
+                cv2.putText(img, f'{ranges[i]:.2f} m @ {deg[i]:+.0f} deg', (p[0] + 8, p[1] - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            for row, (label, centre) in enumerate((('left', 90.0), ('right', -90.0))):
+                sel = ok & (np.abs(deg - centre) <= side_half)
+                txt = f'{ranges[sel].min():.3f} m' if np.any(sel) else 'nothing'
+                cv2.putText(img, f'{label} {txt}', (12, 52 + 20 * row),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 120, 0), 1)
+
+        ahead = 'nothing' if front >= RANGE_NONE else f'{front:.3f} m'
+        cv2.putText(img, f'ahead {ahead}  (+/-{front_half:.0f} deg)', (12, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 230, 255), 2)
+        cv2.putText(img, 'from the LiDAR centre', (12, size - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150, 150, 150), 1)
+        self.pub_image_front.publish(self.bridge.cv2_to_compressed_imgmsg(img, 'jpg'))
 
     def fnPublishImage(self, points, blocked):
         """The example's top-down picture, as a topic rather than a window."""

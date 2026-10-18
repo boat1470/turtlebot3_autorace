@@ -85,9 +85,12 @@ IMAGES = (
     ('yellow mask', '/detect/image_yellow_lane_marker/compressed'),
     ('sign', '/detect/image_traffic_sign/compressed'),
     ('obstacle', '/detect/image_obstacle/compressed'),
+    # front_range and the side wedges, which the obstacle picture does not draw
+    ('front', '/detect/image_front/compressed'),
 )
 SIGN_IMAGE = IMAGES[3][1]
 OBSTACLE_IMAGE = IMAGES[4][1]
+FRONT_IMAGE = IMAGES[5][1]
 
 # /detect/obstacle is a bitmask, /detect/obstacle_side a value - both the
 # robot's own left and right (detect_obstacle.py)
@@ -95,7 +98,7 @@ BLOCKED_BITS = ((1, 'AHEAD'), (2, 'LEFT'), (4, 'RIGHT'))
 SIDES = {0: 'clear', 1: 'LEFT', 2: 'RIGHT'}
 
 # /detect/traffic_sign and /arx/armed_mission, as mission_control numbers them
-SIGNS = {1: 'CONSTRUCTION', 2: 'LEFT', 3: 'RIGHT', 4: 'PARKING'}
+SIGNS = {1: 'CONSTRUCTION', 2: 'LEFT', 3: 'RIGHT', 4: 'PARKING', 5: 'TUNNEL'}
 MISSIONS = {0: 'none', 1: 'traffic light', 2: 'intersection', 3: 'construction',
             4: 'parking', 5: 'level crossing', 6: 'tunnel'}
 
@@ -674,7 +677,7 @@ class Window:
                     if self.which.get() == SIGN_IMAGE
                     else 'no LiDAR image - detect_obstacle only publishes while\n'
                          'construction, parking or the tunnel is armed'
-                    if self.which.get() == OBSTACLE_IMAGE
+                    if self.which.get() in (OBSTACLE_IMAGE, FRONT_IMAGE)
                     else 'no mask - lane.publish_debug_image: true\n'
                          'in lane.yaml, then restart detect_lane')
 

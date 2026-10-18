@@ -197,7 +197,14 @@ class DetectSign(Node):
 
         self.signs = {}
         for name in self.get_parameter('sign.names').value:
-            for key, default in (('mission', 0), ('value', 0), ('image', f'{name}.png')):
+            # ARX: min_width_px - how wide the board has to look before it
+            # counts, i.e. how close the robot has to be. 0 is any size.
+            # max_mse, min_inliers - this sign's own, -1 for the shared one.
+            # max_width_px - wider than this is not the board (a fit spread
+            # over half the picture); 0 is no limit.
+            for key, default in (('mission', 0), ('value', 0), ('image', f'{name}.png'),
+                                 ('min_width_px', 0.0), ('max_mse', -1.0),
+                                 ('min_inliers', -1), ('max_width_px', 0.0)):
                 self.declare_parameter(f'sign.{name}.{key}', default)
             image = self.get_parameter(f'sign.{name}.image').value
             img = cv2.imread(os.path.join(dir_path, image), 0)
@@ -212,6 +219,10 @@ class DetectSign(Node):
                 'name': name,
                 'mission': self.get_parameter(f'sign.{name}.mission').value,
                 'value': self.get_parameter(f'sign.{name}.value').value,
+                'min_width_px': float(self.get_parameter(f'sign.{name}.min_width_px').value),
+                'max_mse': float(self.get_parameter(f'sign.{name}.max_mse').value),
+                'min_inliers': int(self.get_parameter(f'sign.{name}.min_inliers').value),
+                'max_width_px': float(self.get_parameter(f'sign.{name}.max_width_px').value),
                 'img': img, 'kp': kp, 'des': des,
             }
             self.get_logger().info(
@@ -256,7 +267,15 @@ class DetectSign(Node):
         """
         kp_ref, des_ref = sign['kp'], sign['des']
         min_match_count = self.get_parameter('sign.min_match_count').value
-        max_mse = self.get_parameter('sign.max_mse').value
+        # ARX: per sign, 0 to switch it off. It compares the board's pixel
+        # coordinates in the frame against those in the reference image, so
+        # what it really measures is how far the board sits from the frame's
+        # top-left corner and how much bigger it looks - a close, large board
+        # fails it with every match an inlier (132 px wide at (200, 100):
+        # 11/11 inliers, mse 81940). A sign that must be seen big cannot use it.
+        max_mse = sign['max_mse']
+        if max_mse < 0:
+            max_mse = self.get_parameter('sign.max_mse').value
 
         matches = self.flann.knnMatch(des1, des_ref, k=2)
 
@@ -286,11 +305,33 @@ class DetectSign(Node):
             return None
 
         mse = self.fnCalcMSE(src_pts, dst_pts)
-        if mse >= max_mse:
+        if max_mse > 0 and mse >= max_mse:
             return None
 
         inliers = int(mask.sum())
-        if inliers < self.get_parameter('sign.min_inliers').value:
+        min_inliers = sign['min_inliers']
+        if min_inliers < 0:
+            min_inliers = self.get_parameter('sign.min_inliers').value
+        if inliers < min_inliers:
+            return None
+
+        # ARX: where the board is in the picture, and so how big. M maps the
+        # camera onto the reference, so its inverse carries the reference's
+        # corners back into the frame.
+        h, w = sign['img'].shape[:2]
+        corners = np.float32([[0, 0], [w, 0], [w, h], [0, h]]).reshape(-1, 1, 2)
+        try:
+            box = cv2.perspectiveTransform(corners, np.linalg.inv(M))
+        except np.linalg.LinAlgError:
+            return None
+        xs = box[:, 0, 0]
+        width = float(xs.max() - xs.min())
+        # A fit that mirrors or folds the board over is not a board. A real
+        # view keeps the corners going round the same way as the reference,
+        # which OpenCV's oriented area gives as positive.
+        if not np.isfinite(width) or cv2.contourArea(box, oriented=True) <= 0:
+            return None
+        if sign['max_width_px'] > 0 and width > sign['max_width_px']:
             return None
         return {
             'sign': sign,
@@ -299,6 +340,11 @@ class DetectSign(Node):
             'score': inliers / len(des_ref),
             'inliers': inliers,
             'mse': mse,
+            'width': width,
+            'box': box,
+            # Matched, but not yet as big as it has to be. Not a detection -
+            # kept only so the debug image can show how big it is.
+            'small': width < sign['min_width_px'],
         }
 
     def cbFindTrafficSign(self, image_msg):
@@ -335,14 +381,22 @@ class DetectSign(Node):
             self.fnPublishImage(cv_image_input)
             return
 
-        hits = [m for m in (self.fnMatchSign(kp1, des1, s) for s in candidates)
-                if m is not None]
+        matched = [m for m in (self.fnMatchSign(kp1, des1, s) for s in candidates)
+                   if m is not None]
+        hits = [m for m in matched if not m['small']]
+        small = [m for m in matched if m['small']]
 
         # ARX: one winner per frame. The example tested each sign in its own
         # `if` and published every one that matched, so anything keeping the
         # latest value saw whichever happened to be tested last.
         if not hits:
-            self.fnPublishImage(cv_image_input)
+            if small:
+                # Drawn in red with its width, so min_width_px can be set by
+                # watching the number grow as the robot comes in.
+                self.fnPublishImage(cv_image_input,
+                                    small=max(small, key=lambda h: h['width']))
+            else:
+                self.fnPublishImage(cv_image_input)
             return
         if len(hits) > 1:
             self.get_logger().info(
@@ -356,12 +410,29 @@ class DetectSign(Node):
         self.get_logger().info(
             f'Detect {best["sign"]["name"]} sign '
             f'({best["inliers"]} inliers, score {best["score"]:.3f}, '
-            f'mse {best["mse"]:.0f})')
+            f'mse {best["mse"]:.0f}, width {best["width"]:.0f} px)')
 
         self.fnPublishImage(cv_image_input, kp1, best,
                             best['sign']['img'], best['sign']['kp'])
 
-    def fnPublishImage(self, cv_image_input, kp1=None, match=None, img_ref=None, kp_ref=None):
+    def fnDrawBox(self, image, match, colour):
+        """The board's outline and width in px - what min_width_px is set from (ARX).
+
+        Yellow for a detection, red for a board matched but still too small.
+        """
+        image = image.copy()
+        cv2.polylines(image, [np.int32(match['box'])], True, colour, 2)
+        x, y = np.int32(match['box'][:, 0, :].min(axis=0))
+        need = match['sign']['min_width_px']
+        text = f'{match["sign"]["name"]} {match["width"]:.0f} px'
+        if need > 0:
+            text += f' / {need:.0f}'
+        cv2.putText(image, text, (int(x), max(int(y) - 6, 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1)
+        return image
+
+    def fnPublishImage(self, cv_image_input, kp1=None, match=None, img_ref=None, kp_ref=None,
+                       small=None):
         """Publish the debug image, with the matches drawn on if there are any (ARX).
 
         The original inlined four near-identical copies of this, selected by
@@ -373,7 +444,10 @@ class DetectSign(Node):
 
         if match is None:
             final = cv_image_input
+            if small is not None:
+                final = self.fnDrawBox(cv_image_input, small, (0, 0, 255))
         else:
+            cv_image_input = self.fnDrawBox(cv_image_input, match, (0, 255, 255))
             draw_params = {
                 'matchColor': (255, 0, 0),  # draw matches in green color
                 'singlePointColor': None,

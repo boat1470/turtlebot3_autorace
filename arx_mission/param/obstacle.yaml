@@ -64,11 +64,15 @@
       always_on: false
 
       # ARX: the wedge straight ahead reported as a distance on
-      # /detect/front_range. Wide, because what it has to catch is the mouth
-      # of the tunnel, and the walls that mark it stand off to both sides of
-      # the gap the robot is aiming at rather than square in front of it.
+      # /detect/front_range - measured from the LiDAR's centre, about 7-8 cm
+      # behind the robot's nose.
+      #
+      # Wide, at 45 either side, because the mouth of the tunnel is a gap:
+      # straight ahead (tried at +/-2, 2026-10-17) looks through it to the far
+      # wall, 0.67 m away with the robot already between the walls. What
+      # comes close is the corners of the mouth, off to the sides. Seen on
+      # /detect/image_front (lane_debug's `front` tab).
       #
       # The narrow box on /detect/obstacle asks "can I carry on", which is the
-      # construction zone's question. This one asks how far, because what
-      # wants it is a decision about when to stop steering by the lane.
+      # construction zone's question. This one asks how far.
       front_angle_deg: 45.0

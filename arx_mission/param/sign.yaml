@@ -14,7 +14,7 @@
       #
       # The values keep the numbers the example's own Enum produced
       # (construction 1, left 2, right 3) so its tooling still reads them.
-      names: [left, right, construction, parking]
+      names: [left, right, construction, parking, tunnel]
 
       left:
         mission: 2
@@ -36,6 +36,36 @@
         mission: 4
         value: 4
         image: parking.png
+      # The board in front of the tunnel. It only counts once it looks at
+      # least min_width_px wide - that is what says the robot has reached
+      # the tunnel rather than just seen it. tunnel.png is autorace_idminer's
+      # for now; cut one from this robot's camera if it matches badly.
+      #
+      # 2026-10-17: tunnel.png is the real board now, cut from
+      # image/frames/tunnel_frame.png (320x240). In that frame the board is
+      # 61 px wide, 19/32 inliers, and already near the left edge - closer in
+      # it leaves the picture before it gets much bigger, so this cannot be
+      # set far above what that frame gives. 55 leaves room for jitter.
+      #
+      # To re-measure: stand the robot where it should stop, run detect_sign
+      # with always_on:=true, and read `width` off the log (or the box on
+      # /detect/image_traffic_sign - red is matched but still too small).
+      tunnel:
+        mission: 6
+        value: 5
+        image: tunnel.png
+        min_width_px: 55.0
+        # Off for this one. sign.max_mse grows with how big the board looks
+        # and how far it sits from the top-left of the frame, so it rejects
+        # exactly the close, big board this sign is waiting for. The RANSAC
+        # inliers, the width and the not-mirrored check do the job instead.
+        max_mse: 0.0
+        # Measured on the real robot 2026-10-17. Real views of the board
+        # gave 11-21 inliers at 55-83 px; the false ones that stopped a run
+        # gave 4-6 inliers and boxes 144 and 359 px wide - wider than the
+        # 320 px frame. The board leaves the picture long before 200 px.
+        min_inliers: 8
+        max_width_px: 200.0
 
       # Good matches a reference image needs before it is considered at all.
       # The original wrote `len(good) > MIN_MATCH_COUNT` with MIN_MATCH_COUNT
