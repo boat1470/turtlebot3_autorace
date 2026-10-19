@@ -167,6 +167,10 @@ class DetectLevel(Node):
         self.pub_range = self.create_publisher(Float32, '/detect/level_range', 10)
         self.pub_image = self.create_publisher(
             CompressedImage, '/detect/image_output/compressed', 10)
+        # ARX: the red mask itself, for tuning level.red.* - white is what
+        # passed the colour test, before any size or shape test.
+        self.pub_mask = self.create_publisher(
+            CompressedImage, '/detect/image_output_sub1/compressed', 10)
 
         self.get_logger().info('DetectLevel Node Initialized')
 
@@ -197,7 +201,7 @@ class DetectLevel(Node):
         image = self.cv_bridge.imgmsg_to_cv2(msg, 'bgr8')
         mask = self.fnMaskRed(image)
         blobs = self.fnFindBlobs(mask)
-        bar, span, chosen, line = self.fnReadBar(blobs)
+        bar, span, chosen, line, why = self.fnReadBar(blobs)
 
         out = UInt8()
         out.data = bar
@@ -219,7 +223,8 @@ class DetectLevel(Node):
                 f'({len(blobs)} blobs, {len(chosen)} on the bar{where})')
 
         if self.get_parameter('level.publish_debug_image').value:
-            self.fnPublishImage(image, blobs, chosen, line, bar, rng.data)
+            self.fnPublishImage(image, blobs, chosen, line, bar, rng.data, why)
+            self.fnPublishMask(blobs)
 
     def fnMaskRed(self, image):
         """Both halves of red, inverted for the blob detector (ARX)."""
@@ -264,14 +269,17 @@ class DetectLevel(Node):
     def fnReadBar(self, blobs):
         """The bar's state, and how wide it is in pixels (ARX).
 
-        Returns (state, span_px, blobs on the bar, fitted line or None).
+        Returns (state, span_px, blobs on the bar, fitted line or None,
+        why - a few words on what decided it, for the debug image).
         """
-        if len(blobs) < self.get_parameter('level.min_blobs').value:
-            return BAR_NONE, 0.0, [], None
+        need = self.get_parameter('level.min_blobs').value
+        if len(blobs) < need:
+            return BAR_NONE, 0.0, [], None, f'{len(blobs)} blobs < min_blobs {need}'
 
         chosen = self.fnLargestRow(blobs)
-        if len(chosen) < self.get_parameter('level.min_blobs').value:
-            return BAR_NONE, 0.0, chosen, None
+        if len(chosen) < need:
+            return (BAR_NONE, 0.0, chosen, None,
+                    f'{len(chosen)} in one row < min_blobs {need} (row_band_px)')
 
         pts = np.array([b.pt for b in chosen], dtype=np.float32)
         vx, vy, x0, y0 = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01).ravel()
@@ -285,16 +293,21 @@ class DetectLevel(Node):
         gaps = np.diff(along)
 
         line = (float(vx), float(vy), float(x0), float(y0))
-        if off.max() > self.get_parameter('level.max_line_error_px').value:
-            return BAR_NONE, 0.0, chosen, line
-        if gaps.size > 1 and gaps.std() > self.get_parameter(
-                'level.max_gap_spread_px').value:
-            return BAR_NONE, 0.0, chosen, line
+        max_off = self.get_parameter('level.max_line_error_px').value
+        if off.max() > max_off:
+            return (BAR_NONE, 0.0, chosen, line,
+                    f'not in a line: {off.max():.1f} > max_line_error_px {max_off}')
+        max_spread = self.get_parameter('level.max_gap_spread_px').value
+        if gaps.size > 1 and gaps.std() > max_spread:
+            return (BAR_NONE, 0.0, chosen, line,
+                    f'uneven gaps: {gaps.std():.1f} > max_gap_spread_px {max_spread}')
 
         slope = abs(vy / vx) if abs(vx) > 1e-6 else float('inf')
-        if slope > self.get_parameter('level.up_slope').value:
-            return BAR_UP, 0.0, chosen, line
-        return BAR_DOWN, float(along[-1] - along[0]), chosen, line
+        up = self.get_parameter('level.up_slope').value
+        if slope > up:
+            return BAR_UP, 0.0, chosen, line, f'slope {slope:.2f} > up_slope {up}'
+        return (BAR_DOWN, float(along[-1] - along[0]), chosen, line,
+                f'slope {slope:.2f} <= up_slope {up}')
 
     def fnLargestRow(self, blobs):
         """The biggest group of blobs sharing an image row (ARX).
@@ -313,7 +326,16 @@ class DetectLevel(Node):
                 best = group
         return best
 
-    def fnPublishImage(self, image, blobs, chosen, line, bar, rng):
+    def fnPublishMask(self, blobs):
+        """The red mask, white = passed level.red.*, with how much passed (ARX)."""
+        frame = cv2.cvtColor(self.mask_red, cv2.COLOR_GRAY2BGR)
+        n = int(cv2.countNonZero(self.mask_red))
+        cv2.putText(frame, f'red px {n}   blobs {len(blobs)}', (10, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+        self.pub_mask.publish(
+            self.cv_bridge.cv2_to_compressed_imgmsg(frame, 'jpg'))
+
+    def fnPublishImage(self, image, blobs, chosen, line, bar, rng, why=''):
         frame = cv2.drawKeypoints(
             image, blobs, np.array([]), (90, 90, 90),
             cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
@@ -332,6 +354,12 @@ class DetectLevel(Node):
         text = BAR_NAMES[bar] + ('' if bar != BAR_DOWN else f'  {rng:.2f} m')
         cv2.putText(frame, text, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                     (0, 0, 255) if bar == BAR_DOWN else (0, 255, 0), 2)
+        # What decided it - blobs seen, how many made the row, and the test
+        # that settled it - so a wrong call says which parameter to move.
+        cv2.putText(frame, f'{len(blobs)} blobs, {len(chosen)} in the row', (10, 48),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+        cv2.putText(frame, why, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    (255, 255, 255), 2)
         self.pub_image.publish(
             self.cv_bridge.cv2_to_compressed_imgmsg(frame, 'jpg'))
 

@@ -94,10 +94,14 @@ IMAGES = (
     ('obstacle', '/detect/image_obstacle/compressed'),
     # front_range and the side wedges, which the obstacle picture does not draw
     ('front', '/detect/image_front/compressed'),
+    # detect_level: the bar call drawn on the camera frame, and the red mask
+    ('level', '/detect/image_level/compressed'),
+    ('level mask', '/detect/image_level_mask/compressed'),
 )
 SIGN_IMAGE = IMAGES[3][1]
 OBSTACLE_IMAGE = IMAGES[4][1]
 FRONT_IMAGE = IMAGES[5][1]
+LEVEL_IMAGES = (IMAGES[6][1], IMAGES[7][1])
 
 # /detect/obstacle is a bitmask, /detect/obstacle_side a value - both the
 # robot's own left and right (detect_obstacle.py)
@@ -337,7 +341,10 @@ class Window:
                                     command=self.switch, indicatoron=False, width=10,
                                     bg='#2a2a2a', fg=fg, selectcolor='#3a5a8a',
                                     activebackground='#3a3a3a', activeforeground=fg)
-                rb.grid(row=0, column=i, padx=(0, 4))
+                # Five to a row, so the window stays the image's width; the
+                # sign's label sits on row 1 under its button.
+                rb.grid(row=0 if i < 5 else 2, column=i % 5, padx=(0, 4),
+                        pady=(0 if i < 5 else 4, 0))
                 if topic == OBSTACLE_IMAGE:
                     self.obst_tab = rb
                 if topic == SIGN_IMAGE:
@@ -741,6 +748,9 @@ class Window:
                     else 'no LiDAR image - detect_obstacle only publishes while\n'
                          'construction, parking or the tunnel is armed'
                     if self.which.get() in (OBSTACLE_IMAGE, FRONT_IMAGE)
+                    else 'no level image - detect_level runs with level_source:=camera\n'
+                         'and looks only while mission 5 is armed (or always_on:=true)'
+                    if self.which.get() in LEVEL_IMAGES
                     else 'no mask - lane.publish_debug_image: true\n'
                          'in lane.yaml, then restart detect_lane')
 

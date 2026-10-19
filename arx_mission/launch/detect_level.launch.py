@@ -16,6 +16,7 @@ how to look at the reading on its own:
 
     ros2 launch arx_mission detect_level.launch.py always_on:=true
     ros2 run rqt_image_view rqt_image_view    # /detect/image_level/compressed
+                                              # /detect/image_level_mask/compressed
 
 The picture shows both sets of blobs: grey for everything the detector saw,
 yellow for the ones it decided belong to the bar, and the blue line is what
@@ -64,6 +65,7 @@ def generate_launch_description():
             # off the ground beyond recognition.
             ('/detect/image_input', '/camera/image_compensated'),
             ('/detect/image_output/compressed', '/detect/image_level/compressed'),
+            ('/detect/image_output_sub1/compressed', '/detect/image_level_mask/compressed'),
         ]
     )
 
