@@ -110,6 +110,10 @@ class ImageCompensation(Node):
         elif self.sub_image_type == 'raw':
             cv_image_original = self.cvBridge.imgmsg_to_cv2(msg_img, 'bgr8')
 
+        # ARX: a frame that did not decode is skipped, not a crash.
+        if cv_image_original is None:
+            return
+
         cv_image_compensated = np.copy(cv_image_original)
 
         clip_hist_percent = self.clip_hist_percent
@@ -133,21 +137,33 @@ class ImageCompensation(Node):
             clip_hist_percent *= (total_max / 100.)
             clip_hist_percent /= 2.
 
+            # ARX: both walks bounded. On an all-black frame - the first ones
+            # while the Pi's camera is still starting - every bin of the
+            # cumulative histogram equals the total, the second walk never
+            # stops, and it ran off the front of the array (IndexError: index
+            # -257), which killed the node and with it /camera/image_compensated.
             min_gray = 0
-            while accumulator[min_gray] < clip_hist_percent:
+            while min_gray < hist_size - 1 and accumulator[min_gray] < clip_hist_percent:
                 min_gray += 1
 
             max_gray = hist_size - 1
-            while accumulator[max_gray] >= (total_max - clip_hist_percent):
+            while max_gray > 0 and accumulator[max_gray] >= (total_max - clip_hist_percent):
                 max_gray -= 1
 
         input_range = max_gray - min_gray
+        # ARX: a flat frame (one grey level, or black) has nothing to stretch;
+        # pass it on unchanged rather than divide by zero.
+        if input_range <= 0:
+            self.publish_compensated(cv_image_original)
+            return
 
         alpha = (hist_size - 1) / input_range
         beta = -min_gray * alpha
 
         cv_image_compensated = cv2.convertScaleAbs(cv_image_compensated, -1, alpha, beta)
+        self.publish_compensated(cv_image_compensated)
 
+    def publish_compensated(self, cv_image_compensated):
         if self.pub_image_type == 'compressed':
             self.pub_image_compensated.publish(
                 self.cvBridge.cv2_to_compressed_imgmsg(
