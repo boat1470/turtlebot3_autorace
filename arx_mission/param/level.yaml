@@ -28,7 +28,7 @@
         hue_lo_l: 0
         hue_lo_h: 10
         hue_hi_l: 160
-        hue_hi_h: 179
+        hue_hi_h: 165
         saturation_l: 173
         saturation_h: 255
         lightness_l: 106
@@ -99,4 +99,4 @@
 
       frame_skip: 1
       publish_debug_image: true
-      always_on: false
+      always_on: true
