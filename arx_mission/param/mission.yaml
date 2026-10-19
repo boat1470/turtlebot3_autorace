@@ -960,6 +960,15 @@
       # beside the robot kept reading "down" after the bar had lifted.
       slow_m: 0.45
       clear_m: 0.20
+      # level_source:=camera (2026-10-20): creep once the camera sees DOWN at
+      # or inside camera.slow_m, stop at camera.stop_m, go on once it reads
+      # UP or loses the bar (clear_ticks). Its range is k_px_m / band span -
+      # an estimate; it goes blind under ~0.20 m, and blind counts as lifted.
+      camera:
+        # 0.70 on 2026-10-20 (was 0.40): the run at 01:05 saw DOWN at
+        # 0.59-0.66 m and only got under 0.40 at 0.16, already past the stop.
+        slow_m: 0.70
+        stop_m: 0.20
       # A range older than this does not count (Pi node stopped, Wi-Fi gap).
       range_max_age_s: 0.5
 
@@ -985,6 +994,7 @@
       # 2026-10-18: 0.10, for the HC-SR04 on the robot's front - it measures
       # from the sensor's face and is good down to a few cm. Back to 0.30 if
       # level_source is ever the camera again, which goes blind under 0.20.
+      # The ultrasonic's stop. The camera has its own, camera.stop_m above.
       stop_m: 0.10
 
       speed: 0.04

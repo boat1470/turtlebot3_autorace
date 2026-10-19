@@ -94,6 +94,8 @@ FULL_LAUNCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
                            'arx_mission', 'launch', 'full.launch.py')
 MISSION_CMD = 'ros2 launch arx_mission full.launch.py sim:=false start:={}'
 SKIP_LEVEL = ' skip_level:=true'
+# Mission 5 read by the camera (detect_level) instead of the Pi's HC-SR04.
+LEVEL_CAMERA = ' level_source:=camera'
 
 
 def presets():
@@ -441,6 +443,7 @@ class Window:
         names = presets()
         self.preset = tk.StringVar(value='mission4' if 'mission4' in names else names[0])
         self.skip_level = tk.BooleanVar(value=False)
+        self.level_camera = tk.BooleanVar(value=False)
         self.mission = Job('run', 'full.launch', self.mission_command(), self.out)
         self.jobs.append(self.mission)
         box = group('mission  (this PC)', [self.mission])
@@ -465,6 +468,9 @@ class Window:
         tk.Checkbutton(box, text='skip mission 5 (level crossing) - straight on to the tunnel',
                        variable=self.skip_level,
                        command=self.pick_preset).grid(row=2, column=0, columnspan=5, sticky='w')
+        tk.Checkbutton(box, text='mission 5 by camera (detect_level) - not the ultrasonic',
+                       variable=self.level_camera,
+                       command=self.pick_preset).grid(row=3, column=0, columnspan=5, sticky='w')
         self.rows.append((self.mission, None, st, led))
         self.mission_pending = False
         self.paint_mission_button()
@@ -502,9 +508,13 @@ class Window:
                 bg='#1e8449', activebackground='#27ae60')
 
     def mission_command(self):
-        """full.launch for the chosen preset, with mission 5 left out if asked."""
+        """full.launch for the chosen preset; mission 5 left out, or by camera, if asked."""
         cmd = MISSION_CMD.format(self.preset.get())
-        return cmd + SKIP_LEVEL if self.skip_level.get() else cmd
+        if self.skip_level.get():
+            cmd += SKIP_LEVEL
+        if self.level_camera.get():
+            cmd += LEVEL_CAMERA
+        return cmd
 
     def pick_preset(self):
         """Point the mission job at the chosen preset - not while it runs."""
