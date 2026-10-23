@@ -85,7 +85,14 @@ COMMANDS = (
      'calibration_mode:=True'),
     ('calibration', 'rqt', 'rqt_reconfigure',
      'ros2 run rqt_reconfigure rqt_reconfigure'),
+    # detect_sign on its own, looking for every sign, for tuning sign.arrow.*
+    # against the lane_debug sign / sign mask tabs (docs/16). Needs intrinsic
+    # and extrinsic for /camera/image_compensated; left out of "start all".
+    ('calibration', 'sign', 'detect_sign (always on)',
+     'ros2 launch arx_mission detect_sign.launch.py always_on:=true'),
 )
+# Calibration jobs "start all" leaves alone - started by their own button.
+NOT_IN_START_ALL = ('sign',)
 
 # The full stack on this PC, started at whichever of full.launch.py's presets
 # is picked. The list is read from the launch file, so a new preset shows up
@@ -96,6 +103,9 @@ MISSION_CMD = 'ros2 launch arx_mission full.launch.py sim:=false start:={}'
 SKIP_LEVEL = ' skip_level:=true'
 # Mission 5 read by the camera (detect_level) instead of the Pi's HC-SR04.
 LEVEL_CAMERA = ' level_source:=camera'
+# detect_lane's white and yellow masks - full.launch leaves them off, so the
+# lane_debug mask tabs and the bags have none without this.
+LANE_MASKS = ' debug_image:=true'
 
 
 def presets():
@@ -412,7 +422,7 @@ class Window:
         # The junction sign on the ESP32 - see SignBoard and the docstring.
         self.sign = SignBoard(mqtt_host, mqtt_port, self.out)
         self.sign_side = tk.StringVar(value='left')
-        self.sign_delay = tk.StringVar(value='5')
+        self.sign_delay = tk.StringVar(value='15')
         self.sign_active = False
         self.sign_due = None          # (monotonic, side) of the pending send
         self.sign_down_ok = True      # whether the last `down` went out
@@ -435,15 +445,24 @@ class Window:
         self.sign_link.grid(row=1, column=0, columnspan=8, sticky='w')
         self.sign_line = tk.Label(box, text='', anchor='w', fg='#555')
         self.sign_line.grid(row=2, column=0, columnspan=8, sticky='w')
+        # Hand control: move the arms now, whatever active and the delay say.
+        hand = tk.Frame(box)
+        hand.grid(row=3, column=0, columnspan=8, sticky='w', pady=(4, 0))
+        tk.Label(hand, text='now:').pack(side='left')
+        for word, text in (('left', '◀  left'), ('right', 'right  ▶'),
+                           ('down', '▼  down')):
+            tk.Button(hand, text=text, width=9, font=('TkDefaultFont', 11, 'bold'),
+                      command=lambda w=word: self.send_sign_now(w)).pack(side='left', padx=4)
         self.paint_sign()
 
         # The full stack, from a chosen preset. It starts its own camera
         # pipeline (intrinsic and extrinsic), so starting it stops the
         # calibration group first - two of each fight over the same topics.
         names = presets()
-        self.preset = tk.StringVar(value='mission4' if 'mission4' in names else names[0])
+        self.preset = tk.StringVar(value='full' if 'full' in names else names[0])
         self.skip_level = tk.BooleanVar(value=False)
         self.level_camera = tk.BooleanVar(value=False)
+        self.lane_masks = tk.BooleanVar(value=False)
         self.mission = Job('run', 'full.launch', self.mission_command(), self.out)
         self.jobs.append(self.mission)
         box = group('mission  (this PC)', [self.mission])
@@ -471,6 +490,9 @@ class Window:
         tk.Checkbutton(box, text='mission 5 by camera (detect_level) - not the ultrasonic',
                        variable=self.level_camera,
                        command=self.pick_preset).grid(row=3, column=0, columnspan=5, sticky='w')
+        tk.Checkbutton(box, text='lane masks (debug_image) - white and yellow mask images',
+                       variable=self.lane_masks,
+                       command=self.pick_preset).grid(row=4, column=0, columnspan=5, sticky='w')
         self.rows.append((self.mission, None, st, led))
         self.mission_pending = False
         self.paint_mission_button()
@@ -508,12 +530,14 @@ class Window:
                 bg='#1e8449', activebackground='#27ae60')
 
     def mission_command(self):
-        """full.launch for the chosen preset; mission 5 left out, or by camera, if asked."""
+        """full.launch for the chosen preset, with the checkboxes' arguments on the end."""
         cmd = MISSION_CMD.format(self.preset.get())
         if self.skip_level.get():
             cmd += SKIP_LEVEL
         if self.level_camera.get():
             cmd += LEVEL_CAMERA
+        if self.lane_masks.get():
+            cmd += LANE_MASKS
         return cmd
 
     def pick_preset(self):
@@ -556,6 +580,25 @@ class Window:
             self.sign_down_ok = self.sign.send('down')
         self.sign_due = None
         self.sign_sent = ''
+        self.paint_sign()
+
+    def send_sign_now(self, word):
+        """One of the hand buttons: send it now, and drop any timed send.
+
+        A pending side from START would otherwise land on top of this a few
+        seconds later and undo it.
+        """
+        dropped = self.sign_due
+        self.sign_due = None
+        if self.sign.send(word):
+            self.sign_sent = f'sent {word} by hand at {time.strftime("%H:%M:%S")}'
+            if dropped is not None:
+                self.sign_sent += f' - the timed {dropped[1]} is cancelled'
+            self.sign.ask()           # so the board's answer line catches up
+        else:
+            self.sign_sent = f'NOT SENT: {word} - not connected to the board'
+            if dropped is not None:
+                self.sign_sent += f' (the timed {dropped[1]} is cancelled too)'
         self.paint_sign()
 
     def paint_sign(self):
@@ -619,7 +662,8 @@ class Window:
                 job.stop()
         else:
             for job in self.calib:
-                job.start()
+                if job.tag not in NOT_IN_START_ALL:
+                    job.start()
 
     def stop_all(self):
         for job in self.jobs:

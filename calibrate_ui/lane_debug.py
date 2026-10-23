@@ -91,6 +91,8 @@ IMAGES = (
     ('white mask', '/detect/image_white_lane_marker/compressed'),
     ('yellow mask', '/detect/image_yellow_lane_marker/compressed'),
     ('sign', '/detect/image_traffic_sign/compressed'),
+    # detect_sign's arrow reader: the blue mask, discs boxed (yellow = read)
+    ('sign mask', '/detect/image_traffic_sign_mask/compressed'),
     ('obstacle', '/detect/image_obstacle/compressed'),
     # front_range and the side wedges, which the obstacle picture does not draw
     ('front', '/detect/image_front/compressed'),
@@ -98,10 +100,11 @@ IMAGES = (
     ('level', '/detect/image_level/compressed'),
     ('level mask', '/detect/image_level_mask/compressed'),
 )
-SIGN_IMAGE = IMAGES[3][1]
-OBSTACLE_IMAGE = IMAGES[4][1]
-FRONT_IMAGE = IMAGES[5][1]
-LEVEL_IMAGES = (IMAGES[6][1], IMAGES[7][1])
+_TOPIC = dict(IMAGES)          # by name, so adding a tab cannot shift these
+SIGN_IMAGE = _TOPIC['sign']
+OBSTACLE_IMAGE = _TOPIC['obstacle']
+FRONT_IMAGE = _TOPIC['front']
+LEVEL_IMAGES = (_TOPIC['level'], _TOPIC['level mask'])
 
 # /detect/obstacle is a bitmask, /detect/obstacle_side a value - both the
 # robot's own left and right (detect_obstacle.py)
@@ -240,7 +243,9 @@ RECORD_TOPICS = (
     '/detect/image_white_lane_marker/compressed',
     '/detect/lane', '/detect/lane_ahead', '/detect/lane_state',
     '/detect/yellow_line_reliability', '/detect/white_line_reliability',
-    '/detect/traffic_sign', '/detect/obstacle', '/detect/obstacle_side',
+    '/detect/traffic_sign', '/detect/image_traffic_sign/compressed',
+    '/detect/image_traffic_sign_mask/compressed',
+    '/detect/obstacle', '/detect/obstacle_side',
     '/detect/front_range', '/arx/armed_mission', '/cmd_vel', '/odom', '/scan',
     '/detect/level_bar', '/detect/level_range',
     '/rosout',
@@ -664,16 +669,16 @@ class Window:
         armed = '?' if m is None else MISSIONS.get(m, str(m))
         v = values.get('/detect/traffic_sign')
         if v is None:
-            sign, colour = 'no sign yet', '#777'
+            sign, colour = 'no sign yet', '#e04040'     # red: nothing from detect_sign
         else:
             age = now - v[1]
             sign = f'{SIGNS.get(v[0], str(v[0]))} ({v[0]})  {age:.1f} s ago'
-            colour = '#30b050' if age < 1.0 else '#e8e8e8' if age < 5.0 else '#777'
+            colour = '#30b050' if age < 5.0 else '#777'   # green while reports come in
         self.sign_text.config(text=f'armed: {armed}\nsign:  {sign}', fg=colour)
         under = getattr(self, 'sign_tab_text', None)
         if under is not None:
             if v is None:
-                under.config(text='-', fg='#777')
+                under.config(text='-', fg='#e04040')
             else:
                 # Short, so the label stays the width of the button above it.
                 name = {1: 'CONSTR'}.get(v[0], SIGNS.get(v[0], str(v[0])))
@@ -693,7 +698,7 @@ class Window:
                        selectcolor='#3fa05c' if live else '#b03a3a',
                        activebackground='#3a8a52' if live else '#9a3a3a')
         if b is None:
-            self.obst_text.config(text='obstacle: no report - armed? /scan up?', fg='#777')
+            self.obst_text.config(text='obstacle: no report - armed? /scan up?', fg='#e04040')
         else:
             ahead = ' + '.join(n for bit, n in BLOCKED_BITS if b & bit) or 'clear'
             side = '-' if sd is None else SIDES.get(sd, str(sd))
@@ -722,7 +727,7 @@ class Window:
                 fg='#777' if rng_stale else fg)
         elif bar is None:
             self.level_text.config(
-                text='crossing bar: no report - mission 5 armed? ultrasonic up?', fg='#777')
+                text='crossing bar: no report - mission 5 armed? ultrasonic up?', fg='#e04040')
         else:
             state = LEVEL_BAR.get(bar, str(bar))
             dist = '' if brng is None or brng >= 9.0 else f'  {brng:.2f} m'

@@ -22,13 +22,13 @@ detect_sign's score is divided by. The arrows that work were cut with the disc
 55-91 px across and 29-32 descriptors (arx_mission/image/README.md); a sign
 much smaller than that in frame wants the robot moved closer before cutting.
 
-The default directory is arx_mission/image, the package's own, which is
-installed as symlinks: overwriting one of the names detect_sign already loads
-(construction.png, parking.png, left.png, right.png) takes effect on its next
-start without a build. A new name needs `colcon build` and an entry in
-sign.yaml. Saving over a file asks first. The whole frame is saved beside the
-cut as <name>_frame.png under <dir>/frames/, for grading the reference on
-frames it was not cut from later.
+The default directory is arx_mission/image, the package's own. Its install is
+a copy, not symlinks, so nothing saved here reaches detect_sign until
+`colcon build --packages-select arx_mission`. A new name also needs an entry
+in sign.yaml. Saving over a file asks first, and a box with fewer than
+MIN_DESCRIPTORS SIFT descriptors is refused - move the robot closer. The
+whole frame is saved beside the cut as <name>_frame.png under <dir>/frames/,
+for grading the reference on frames it was not cut from later.
 """
 
 import argparse
@@ -49,6 +49,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_DIR = os.path.normpath(os.path.join(HERE, '..', 'arx_mission', 'image'))
 SCALE = 2           # 320x240 shown at 640x480
 FRESH = 1.0         # s a compensated frame stays preferred over the fallback
+MIN_DESCRIPTORS = 15  # fewer and Save refuses; the arrows that work have 29-36
 
 
 def compensate(img, clip=1.0):
@@ -156,8 +157,9 @@ class Window:
         ttk.Button(side, text='Save', command=self.save).pack(fill='x', pady=(8, 0))
 
         self.status = tk.StringVar(value='')
-        ttk.Label(root, textvariable=self.status, foreground='#555',
-                  padding=(8, 0, 8, 8)).grid(row=2, column=0, columnspan=2, sticky='w')
+        self.status_label = ttk.Label(root, textvariable=self.status, foreground='#555',
+                                      padding=(8, 0, 8, 8))
+        self.status_label.grid(row=2, column=0, columnspan=2, sticky='w')
         root.after(100, self.tick)
 
     # --- the box ---------------------------------------------------------
@@ -210,8 +212,8 @@ class Window:
         kp, des = self.sift.detectAndCompute(c, None)
         n = 0 if des is None else len(des)
         x, y, w, h = self.roi
-        hint = ('  fine' if n >= 25 else '  thin - move closer?' if n >= 12
-                else '  too few - move closer')
+        hint = ('  fine' if n >= 25 else '  thin - move closer?' if n >= MIN_DESCRIPTORS
+                else f'  too few - Save refuses under {MIN_DESCRIPTORS}, move closer')
         self.info.set(f'box {w} x {h} px at ({x}, {y})\n'
                       f'SIFT descriptors {n}{hint}\n'
                       f'(the arrows that work: 29-32)')
@@ -227,32 +229,68 @@ class Window:
     def toggle_freeze(self):
         self.frozen = not self.frozen
         self.freeze_btn.config(text='Live  (space)' if self.frozen else 'Freeze  (space)')
-        self.status.set('frozen - set the box, then Save' if self.frozen else 'live')
+        self.say('frozen - set the box, then Save' if self.frozen else 'live')
+
+    def say(self, text, error=False):
+        """Put a save outcome on the status line and hold it there.
+
+        tick() otherwise writes the frame's source over the status line ten
+        times a second while the view is live, which wiped every refusal
+        before it could be read. A refusal also gets a dialog, so it cannot
+        be missed at all.
+        """
+        self.status.set(text)
+        self.status_label.config(foreground='#c0392b' if error else '#555')
+        self.saved_at = time.monotonic()
+        if error:
+            self.msg.showwarning('not saved', text)
 
     def save(self):
         c = self.crop()
         if c is None:
-            self.status.set('nothing to save - draw a box first')
+            self.say('NOT SAVED: no box - draw a box round the sign first', error=True)
             return
         name = self.name.get().strip()
         if not name:
-            self.status.set('give it a file name')
+            self.say('NOT SAVED: no file name - type one, e.g. left.png', error=True)
+            return
+        # A reference this thin can never reach detect_sign's min_match_count
+        # once the ratio test has had its share, and one with none at all
+        # stops detect_sign at startup (no SIFT features). 2026-10-23: a
+        # 10 x 14 px left.png, cut from a board too far off, had 0.
+        _, des = self.sift.detectAndCompute(c, None)
+        n = 0 if des is None else len(des)
+        if n < MIN_DESCRIPTORS:
+            x, y, w, h = self.roi
+            self.say(f'NOT SAVED: the box ({w} x {h} px) has {n} SIFT descriptors, '
+                     f'at least {MIN_DESCRIPTORS} are needed.\n'
+                     f'The sign is too small in the picture - move the robot closer '
+                     f'(the arrows that work are 55-91 px across, 29-36 descriptors).',
+                     error=True)
             return
         if not os.path.splitext(name)[1]:
             name += '.png'
         path = os.path.join(self.folder, name)
         if os.path.exists(path) and not self.msg.askyesno(
                 'overwrite?', f'{path}\nalready exists. Save over it?'):
-            self.status.set('not saved')
+            self.say(f'not saved - kept the existing {name}')
             return
-        os.makedirs(os.path.join(self.folder, 'frames'), exist_ok=True)
-        cv2.imwrite(path, c)
-        stem = os.path.splitext(name)[0]
-        cv2.imwrite(os.path.join(self.folder, 'frames', f'{stem}_frame.png'), self.frame)
+        try:
+            os.makedirs(os.path.join(self.folder, 'frames'), exist_ok=True)
+            stem = os.path.splitext(name)[0]
+            ok = (cv2.imwrite(path, c) and
+                  cv2.imwrite(os.path.join(self.folder, 'frames', f'{stem}_frame.png'),
+                              self.frame))
+        except (OSError, cv2.error) as e:
+            ok, why = False, str(e)
+        else:
+            why = 'cv2.imwrite returned False (unknown extension, or no write permission?)'
+        if not ok:
+            self.say(f'NOT SAVED: could not write {path}\n{why}', error=True)
+            return
         x, y, w, h = self.roi
-        self.saved_at = time.monotonic()
-        self.status.set(f'saved {path}  ({w}x{h} px from ({x}, {y}))  '
-                        f'+ frames/{stem}_frame.png')
+        self.say(f'saved {path}  ({w}x{h} px from ({x}, {y}), {n} descriptors)  '
+                 f'+ frames/{stem}_frame.png - colcon build arx_mission to use it')
 
     # --- the loop --------------------------------------------------------
 
@@ -274,6 +312,7 @@ class Window:
                     self.measure()
             if time.monotonic() - self.saved_at > 6.0:
                 self.status.set(source)
+                self.status_label.config(foreground='#555')
         self.root.after(100, self.tick)
 
     def run(self):

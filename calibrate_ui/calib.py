@@ -58,7 +58,13 @@ TARGETS = {
     'light': (('red', 'yellow', 'green', 'roi'), 'arx_mission/param/light.yaml'),
     'lane': (('detect.lane',), 'arx_mission/param/lane.yaml'),
     'level': (('level',), 'arx_mission/param/level.yaml'),
-    'sign': (('sign',), 'arx_mission/param/sign.yaml'),
+    # Not the whole of `sign`: that holds sign.always_on, which is true
+    # whenever detect_sign was started on its own to be tuned, and would be
+    # written into the file. The thresholds, the arrow reader and each sign's
+    # own block only.
+    'sign': (('sign.min_match_count', 'sign.max_mse', 'sign.min_inliers', 'sign.arrow',
+              'sign.left', 'sign.right', 'sign.construction', 'sign.parking',
+              'sign.tunnel'), 'arx_mission/param/sign.yaml'),
     'obstacle': (('obstacle',), 'arx_mission/param/obstacle.yaml'),
 }
 
@@ -174,9 +180,14 @@ def find_leaf(lines, dotted):
     for depth, part in enumerate(parts):
         last = depth == len(parts) - 1
         pat = re.compile(rf'^(\s*){re.escape(part)}:\s*(.*)$')
+        # Direct children only: the indent of the block's first key. Without
+        # this, sign.min_inliers matched sign.tunnel.min_inliers, the first
+        # `min_inliers:` anywhere under `sign:`, and was written there.
+        child = next((len(ln) - len(ln.lstrip()) for ln in lines[lo:hi]
+                      if ln.strip() and not ln.lstrip().startswith('#')), None)
         for i in range(lo, hi):
             m = pat.match(lines[i])
-            if not m:
+            if not m or len(m.group(1)) != child:
                 continue
             if last:
                 return i if m.group(2).strip() else None
@@ -212,8 +223,13 @@ def apply(path, values):
         new = render(values[name], old)
         if old == new:
             continue
-        lines[i] = lines[i].replace(f':{rest}', f': {new}' +
-                                    (' #' + rest.split('#', 1)[1] if '#' in rest else ''), 1)
+        if '#' in rest:
+            # Keep the comment where it was: pad the new value to the old
+            # value's width, so a column of aligned comments stays aligned.
+            before, comment = rest.split('#', 1)
+            lines[i] = f'{key}: {new}'.ljust(len(key) + len(before) + 1) + '#' + comment
+        else:
+            lines[i] = f'{key}: {new}'
         changed.append((name, old, new))
     if changed:
         with open(path, 'w', encoding='utf-8') as fh:
