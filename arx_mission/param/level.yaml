@@ -29,9 +29,9 @@
         hue_lo_h: 10
         hue_hi_l: 160
         hue_hi_h: 165
-        saturation_l: 173
+        saturation_l: 160
         saturation_h: 255
-        lightness_l: 106
+        lightness_l: 80
         lightness_h: 255
 
       # How far away the bar can still be seen. The example's 150 gives a
@@ -97,6 +97,14 @@
       # depend on it at all.
       k_px_m: 29.0
 
+      # The part of the frame searched, fractions of the width / height from
+      # the top left; red outside it is blanked before the blobs are found.
+      # Close to the bar it spans ~245 px of the 320 - cut only the noise.
+      roi_x_min: 0.2
+      roi_x_max: 0.8
+      roi_y_min: 0.0
+      roi_y_max: 1.0
+
       frame_skip: 1
       publish_debug_image: true
-      always_on: true
+      always_on: false

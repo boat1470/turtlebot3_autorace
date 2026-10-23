@@ -149,6 +149,16 @@ class DetectLevel(Node):
         # trusted. Until then, /detect/level_bar is the part worth acting on.
         self.declare_parameter('level.k_px_m', 29.0)
 
+        # ARX: the part of the frame searched, as fractions of the width and
+        # height from the top left. Red outside it is blanked from the mask
+        # before any blob is looked for - a red thing at the edge of the room
+        # is otherwise one more blob for the row grouping to weigh.
+        self.declare_parameter('level.roi_x_min', 0.0)
+        self.declare_parameter('level.roi_x_max', 1.0)
+        self.declare_parameter('level.roi_y_min', 0.0)
+        self.declare_parameter('level.roi_y_max', 1.0)
+        self.roi = None
+
         self.declare_parameter('level.frame_skip', 1)
         self.declare_parameter('level.publish_debug_image', True)
         self.declare_parameter('level.always_on', False)
@@ -242,6 +252,18 @@ class DetectLevel(Node):
             np.array([self.get_parameter('level.red.hue_hi_l').value, s_l, v_l]),
             np.array([self.get_parameter('level.red.hue_hi_h').value, s_h, v_h]))
         self.mask_red = cv2.bitwise_or(lo, hi)
+        # ARX: blank everything outside level.roi_*.
+        h, w = self.mask_red.shape[:2]
+
+        def frac(name, size):
+            return int(round(min(max(self.get_parameter(name).value, 0.0), 1.0) * size))
+        x0, x1 = frac('level.roi_x_min', w), frac('level.roi_x_max', w)
+        y0, y1 = frac('level.roi_y_min', h), frac('level.roi_y_max', h)
+        self.mask_red[:y0] = 0
+        self.mask_red[y1:] = 0
+        self.mask_red[:, :x0] = 0
+        self.mask_red[:, x1:] = 0
+        self.roi = (x0, y0, x1, y1)
         # Inverted because SimpleBlobDetector defaults to filterByColor with
         # blobColor 0 - it looks for DARK blobs - so the bands have to be dark
         # on a light field. Blurred because the detector works by thresholding
@@ -328,16 +350,33 @@ class DetectLevel(Node):
 
     def fnPublishMask(self, blobs):
         """The red mask, white = passed level.red.*, with how much passed (ARX)."""
-        frame = cv2.cvtColor(self.mask_red, cv2.COLOR_GRAY2BGR)
+        frame = self.fnDrawRoi(cv2.cvtColor(self.mask_red, cv2.COLOR_GRAY2BGR))
         n = int(cv2.countNonZero(self.mask_red))
         cv2.putText(frame, f'red px {n}   blobs {len(blobs)}', (10, 24),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
         self.pub_mask.publish(
             self.cv_bridge.cv2_to_compressed_imgmsg(frame, 'jpg'))
 
+    def fnDrawRoi(self, frame):
+        """The searched area as a dashed magenta box - only the sides that cut (ARX)."""
+        if self.roi is None:
+            return frame
+        x0, y0, x1, y1 = self.roi
+        h, w = frame.shape[:2]
+        colour = (255, 0, 255)
+        for y in (y0, y1 - 1):
+            if 0 < y < h - 1:
+                for x in range(x0, x1, 8):
+                    cv2.line(frame, (x, y), (min(x + 4, x1 - 1), y), colour, 1)
+        for x in (x0, x1 - 1):
+            if 0 < x < w - 1:
+                for y in range(y0, y1, 8):
+                    cv2.line(frame, (x, y), (x, min(y + 4, y1 - 1)), colour, 1)
+        return frame
+
     def fnPublishImage(self, image, blobs, chosen, line, bar, rng, why=''):
         frame = cv2.drawKeypoints(
-            image, blobs, np.array([]), (90, 90, 90),
+            self.fnDrawRoi(image.copy()), blobs, np.array([]), (90, 90, 90),
             cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
         # The ones that survived the row grouping, over the top, so a wrong
         # call can be read off the picture: grey was seen and dropped, yellow
