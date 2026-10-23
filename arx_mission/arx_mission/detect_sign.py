@@ -120,6 +120,14 @@ class DetectSign(Node):
         # turtlebot3_autorace_detect, or at a directory of images taken on
         # practice day, without touching the code.
         self.declare_parameter('sign.image_dir', '')
+        # ARX: the arrow reader - see fnReadArrow. Read every frame, so all of
+        # these can be set live with `ros2 param set`.
+        for key, default in (('hue_l', 95), ('hue_h', 130), ('sat_l', 80), ('val_l', 40),
+                             ('sat_h', 255), ('val_h', 255),
+                             ('min_area', 40.0), ('max_area', 4000.0), ('min_round', 0.75),
+                             ('min_white', 6), ('white_delta', 25.0),
+                             ('min_offset_px', 1.5), ('roi_y_min', 0.0), ('roi_y_max', 1.0)):
+            self.declare_parameter(f'sign.arrow.{key}', default)
 
         self.sub_image_type = 'raw'  # you can choose image type 'compressed', 'raw'
         self.pub_image_type = 'compressed'  # you can choose image type 'compressed', 'raw'
@@ -149,6 +157,12 @@ class DetectSign(Node):
             self.pub_image_traffic_sign = self.create_publisher(
                 Image, '/detect/image_output', 10
             )
+        # ARX: the arrow reader's blue mask, with the discs it weighed boxed -
+        # where the colour thresholds are set from. Remapped to
+        # /detect/image_traffic_sign_mask/compressed by the launch file.
+        self.pub_image_arrow_mask = self.create_publisher(
+            CompressedImage, '/detect/image_output_sub1/compressed', 10)
+        self.arrow_mask = None
 
         # ARX: the armed gate. SIFT over the whole frame is the most
         # expensive operation in this stack, and on the competition Pi there
@@ -202,9 +216,13 @@ class DetectSign(Node):
             # max_mse, min_inliers - this sign's own, -1 for the shared one.
             # max_width_px - wider than this is not the board (a fit spread
             # over half the picture); 0 is no limit.
+            # method - sift, or arrow for a blue disc whose white arrow is read
+            # by colour (fnReadArrow); arrow - which way that disc's arrow
+            # points when it counts as this sign.
             for key, default in (('mission', 0), ('value', 0), ('image', f'{name}.png'),
                                  ('min_width_px', 0.0), ('max_mse', -1.0),
-                                 ('min_inliers', -1), ('max_width_px', 0.0)):
+                                 ('min_inliers', -1), ('max_width_px', 0.0),
+                                 ('method', 'sift'), ('arrow', name)):
                 self.declare_parameter(f'sign.{name}.{key}', default)
             image = self.get_parameter(f'sign.{name}.image').value
             img = cv2.imread(os.path.join(dir_path, image), 0)
@@ -223,11 +241,16 @@ class DetectSign(Node):
                 'max_mse': float(self.get_parameter(f'sign.{name}.max_mse').value),
                 'min_inliers': int(self.get_parameter(f'sign.{name}.min_inliers').value),
                 'max_width_px': float(self.get_parameter(f'sign.{name}.max_width_px').value),
+                'method': self.get_parameter(f'sign.{name}.method').value,
+                'arrow': self.get_parameter(f'sign.{name}.arrow').value,
                 'img': img, 'kp': kp, 'des': des,
             }
+            how = ('read by colour, arrow ' + self.signs[name]['arrow']
+                   if self.signs[name]['method'] == 'arrow'
+                   else f'{len(des)} descriptors')
             self.get_logger().info(
                 f'  {name}: {image} {img.shape[1]}x{img.shape[0]} '
-                f'{len(des)} descriptors, publishes '
+                f'{how}, publishes '
                 f'{self.signs[name]["value"]} while mission '
                 f'{self.signs[name]["mission"]} is armed')
 
@@ -347,6 +370,82 @@ class DetectSign(Node):
             'small': width < sign['min_width_px'],
         }
 
+    def fnReadArrow(self, image):
+        """Which way the arrow on a blue disc points, read by colour (ARX).
+
+        Returns (read, rejects): read is None or {'dir', 'box', 'head',
+        'stem', 'offset', 'white'}; rejects is [(box, why)] for the discs
+        that did not make it, for the debug image.
+
+        SIFT needs the board big: at the distance the robot actually sees the
+        junction board it is a 15 px disc with a 5 px arrow, where it finds
+        nothing to match (2026-10-23 live frame: 0 inliers with the new
+        references, 4 on the wall with the old). Colour still finds the disc
+        there, and the white inside it still has its head on one side of its
+        stem: tested on that frame (15x17 px) and on frames/left_frame.png,
+        right_frame.png, all three read right.
+
+        1. blue by HSV, closed, as connected blobs, biggest first
+        2. a disc: area in range, near round (min side / max side) - the arm
+           that is down is a disc seen edge on, 15x9
+        3. white inside it: the holes in the blob, and pixels brighter than
+           the disc's mean by white_delta; some in each half
+        4. x of the white in the top half (the head) against the bottom half
+           (the stem): head left of stem is left
+        """
+        g = lambda k: self.get_parameter(f'sign.arrow.{k}').value  # noqa: E731
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        blue = cv2.inRange(hsv, np.array([g('hue_l'), g('sat_l'), g('val_l')]),
+                           np.array([g('hue_h'), g('sat_h'), g('val_h')]))
+        # The band searched: rows outside roi_y_min..roi_y_max (fractions of
+        # the height, from the top) are blanked before anything is looked
+        # for, so the mask image shows exactly what was searched.
+        rows = image.shape[0]
+        y0 = int(round(min(max(g('roi_y_min'), 0.0), 1.0) * rows))
+        y1 = int(round(min(max(g('roi_y_max'), 0.0), 1.0) * rows))
+        blue[:y0] = 0
+        blue[y1:] = 0
+        self.roi_rows = (y0, y1)
+        blue = cv2.morphologyEx(blue, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+        self.arrow_mask = blue
+        n, lab, st, _ = cv2.connectedComponentsWithStats(blue)
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        rejects = []
+        for i in sorted(range(1, n), key=lambda i: -st[i, cv2.CC_STAT_AREA]):
+            x, y, w, h, area = (int(v) for v in st[i])
+            box = (x, y, w, h)
+            if area < g('min_area'):
+                break                       # sorted, so the rest are smaller
+            if area > g('max_area'):
+                continue
+            rnd = min(w, h) / max(w, h)
+            if rnd < g('min_round'):
+                rejects.append((box, f'round {rnd:.2f}'))
+                continue
+            disc = (lab[y:y + h, x:x + w] == i).astype(np.uint8) * 255
+            filled = disc.copy()
+            cnts, _ = cv2.findContours(disc, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(filled, cnts, -1, 255, -1)
+            inside = filled > 0
+            crop = gray[y:y + h, x:x + w]
+            white = (inside & (disc == 0)) | (
+                inside & (crop > crop[inside].mean() + g('white_delta')))
+            ys, xs = np.nonzero(white)
+            top = ys < h / 2.0
+            if len(xs) < g('min_white') or not top.any() or top.all():
+                rejects.append((box, f'white {len(xs)}'))
+                continue
+            hx, sx = xs[top].mean(), xs[~top].mean()
+            offset = float(hx - sx)
+            if abs(offset) < g('min_offset_px'):
+                rejects.append((box, f'off {offset:+.1f}'))
+                continue
+            return ({'dir': 'left' if offset < 0 else 'right', 'box': box,
+                     'head': (x + hx, y + ys[top].mean()),
+                     'stem': (x + sx, y + ys[~top].mean()),
+                     'offset': offset, 'white': len(xs)}, rejects)
+        return None, rejects
+
     def cbFindTrafficSign(self, image_msg):
         # ARX: with nothing to look for, no work is done at all.
         candidates = self.fnCandidates()
@@ -370,6 +469,29 @@ class DetectSign(Node):
             cv_image_input = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         elif self.sub_image_type == 'raw':
             cv_image_input = self.cvBridge.imgmsg_to_cv2(image_msg, 'bgr8')
+
+        # ARX: the signs read by colour first. One of them found ends the
+        # frame, as a SIFT winner does; with none of the SIFT kind armed (the
+        # junction) SIFT does not run at all.
+        arrow_signs = [s for s in candidates if s['method'] == 'arrow']
+        candidates = [s for s in candidates if s['method'] != 'arrow']
+        if arrow_signs:
+            read, rejects = self.fnReadArrow(cv_image_input)
+            sign = None if read is None else next(
+                (s for s in arrow_signs if s['arrow'] == read['dir']), None)
+            if sign is not None:
+                msg_sign = UInt8()
+                msg_sign.data = int(sign['value'])
+                self.pub_traffic_sign.publish(msg_sign)
+                x, y, w, h = read['box']
+                self.get_logger().info(
+                    f'Detect {sign["name"]} sign (arrow, disc {w}x{h} px, '
+                    f'head-stem {read["offset"]:+.1f} px, {read["white"]} white px)')
+                self.fnPublishImage(cv_image_input, arrow=read, rejects=rejects)
+                return
+            if not candidates:
+                self.fnPublishImage(cv_image_input, rejects=rejects)
+                return
 
         # find the keypoints and descriptors with SIFT
         kp1, des1 = self.sift.detectAndCompute(cv_image_input, None)
@@ -431,8 +553,33 @@ class DetectSign(Node):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 1)
         return image
 
+    def fnDrawArrow(self, image, read, rejects):
+        """The arrow reader's view: discs it dropped and why, the one it read (ARX)."""
+        image = image.copy()
+        # The searched band, as two dashed lines - only where it cuts anything.
+        y0, y1 = getattr(self, 'roi_rows', (0, image.shape[0]))
+        for yy in (y0, y1 - 1):
+            if 0 < yy < image.shape[0] - 1:
+                for xx in range(0, image.shape[1], 8):
+                    cv2.line(image, (xx, yy), (xx + 4, yy), (255, 0, 255), 1)
+        for (x, y, w, h), why in rejects:
+            cv2.rectangle(image, (x, y), (x + w, y + h), (150, 150, 150), 1)
+            cv2.putText(image, why, (x, y + h + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.3,
+                        (150, 150, 150), 1)
+        if read is not None:
+            x, y, w, h = read['box']
+            cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 255), 1)
+            cv2.circle(image, tuple(int(v) for v in read['head']), 2, (0, 0, 255), -1)
+            cv2.circle(image, tuple(int(v) for v in read['stem']), 2, (0, 255, 0), -1)
+            cv2.putText(image, f'{read["dir"]} {read["offset"]:+.1f}', (x, max(y - 4, 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+        elif not rejects:
+            cv2.putText(image, 'no blue disc', (6, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                        (150, 150, 150), 1)
+        return image
+
     def fnPublishImage(self, cv_image_input, kp1=None, match=None, img_ref=None, kp_ref=None,
-                       small=None):
+                       small=None, arrow=None, rejects=None):
         """Publish the debug image, with the matches drawn on if there are any (ARX).
 
         The original inlined four near-identical copies of this, selected by
@@ -442,7 +589,13 @@ class DetectSign(Node):
         if not self.get_parameter('sign.publish_debug_image').value:
             return
 
-        if match is None:
+        if rejects is not None:
+            final = self.fnDrawArrow(cv_image_input, arrow, rejects)
+            if self.arrow_mask is not None:
+                self.pub_image_arrow_mask.publish(self.cvBridge.cv2_to_compressed_imgmsg(
+                    self.fnDrawArrow(cv2.cvtColor(self.arrow_mask, cv2.COLOR_GRAY2BGR),
+                                     arrow, rejects), 'jpg'))
+        elif match is None:
             final = cv_image_input
             if small is not None:
                 final = self.fnDrawBox(cv_image_input, small, (0, 0, 255))

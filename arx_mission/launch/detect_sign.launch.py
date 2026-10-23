@@ -63,6 +63,8 @@ def generate_launch_description():
             ('/detect/image_input/compressed', '/camera/image_compensated/compressed'),
             ('/detect/image_output', '/detect/image_traffic_sign'),
             ('/detect/image_output/compressed', '/detect/image_traffic_sign/compressed'),
+            ('/detect/image_output_sub1/compressed',
+             '/detect/image_traffic_sign_mask/compressed'),
         ]
     )
 
