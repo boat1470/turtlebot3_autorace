@@ -1,5 +1,12 @@
 # Reference signs
 
+**2026-10-23: `left` and `right` are no longer matched with SIFT.** On the
+course the junction board is a ~15 px disc where the robot sees it, and SIFT
+finds nothing on that; detect_sign reads the arrow by colour instead
+(`method: arrow` in sign.yaml, `sign.arrow.*`, `fnReadArrow`). `left.png` and
+`right.png` are still loaded, but only drawn on the debug image. Setting
+`method: sift` puts them back on the matcher described below.
+
 `left.png` and `right.png` are the real robot's, cut 2026-10-07 from
 `/camera/image_compensated` with the camera on `ae=false exposure_us=8000
 gain=2.0`. `construction.png` and `parking.png` are still the simulator's.
