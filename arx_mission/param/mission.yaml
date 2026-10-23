@@ -543,7 +543,10 @@
     parking:
       enabled: true
       window: 7
-      confirm_votes: 5
+      # 2, not 5 (2026-10-23): run 1023_1750 got only three parking reports,
+      # all real (5-7 inliers, 33-45 px), in the 0.35 s the board was in
+      # view, and never turned into the lot; good runs that day had 9-14.
+      confirm_votes: 2
 
       # Six, like the construction board and for the same reason: this one
       # is passed side-on while the robot drives, not stared at.

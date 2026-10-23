@@ -1391,13 +1391,18 @@ class MissionControl(Node):
         if not self.get_parameter(f'{prefix}.heading.enabled').value:
             return True
         if self.yaw is None:
-            # No odometry. Accepting is the lesser evil: a gate that cannot
-            # measure anything and refuses everything would fail the mission
-            # without the robot ever being pointed the wrong way.
+            # No odometry yet. This used to accept, as the lesser evil - but
+            # the only time it happens is the first moments after start, and
+            # that is exactly when it did harm: run 1023_1044 confirmed "left"
+            # 0.1 s in, at the start line facing 0 deg (the junction gate
+            # wants 180 +/- 45), on five 4-inlier matches of an arm not yet
+            # raised, and skipped the junction. /odom arrives within the
+            # second; a robot that never gets it cannot do the missions
+            # anyway, and the junction then times out to after_junction.
             self.get_logger().warn(
-                'heading gate is on but no /odom has arrived - accepting the sign anyway',
+                'heading gate is on but no /odom yet - ignoring sign reports until it arrives',
                 once=True)
-            return True
+            return False
         want = self.get_parameter(f'{prefix}.heading.center_deg').value
         tol = self.get_parameter(f'{prefix}.heading.tolerance_deg').value
         # Shortest angular distance, so a window straddling +/-180 works like
