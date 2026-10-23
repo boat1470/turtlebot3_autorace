@@ -121,6 +121,12 @@ ros2 topic echo /battery_state --once
 
 
 
+misison 2 กรณี ป้ายเล็ก 
+1.เปิดกล้อง intrinsic extrinsic
+2.ros2 launch arx_mission detect_sign.launch.py always_on:=true
+3.tune 
+
+
 
 
 mission 5
@@ -132,6 +138,11 @@ ros2 topic echo /detect/level_range
 pi
 
 python3 ~/detect_level_ultrasonic.py --ros-args -p level.always_on:=true
+
+
+
+ros2 launch arx_mission detect_level.launch.py always_on:=true
+
 
 
 
