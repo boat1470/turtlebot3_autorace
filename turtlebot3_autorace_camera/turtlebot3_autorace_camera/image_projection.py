@@ -185,12 +185,11 @@ class ImageProjection(Node):
             )
 
             if self.pub_image_type == 'compressed':
-                self.pub_image_calib.publish(
-                    self.cvBridge.cv2_to_compressed_imgmsg(
-                        cv_image_calib,
-                        'jpg'))
+                calib_out = self.cvBridge.cv2_to_compressed_imgmsg(cv_image_calib, 'jpg')
             elif self.pub_image_type == 'raw':
-                self.pub_image_calib.publish(self.cvBridge.cv2_to_imgmsg(cv_image_calib, 'bgr8'))
+                calib_out = self.cvBridge.cv2_to_imgmsg(cv_image_calib, 'bgr8')
+            calib_out.header = msg_img.header   # ARX: see the projected image below
+            self.pub_image_calib.publish(calib_out)
 
         # adding Gaussian blur to the image of original
         cv_image_original = cv2.GaussianBlur(cv_image_original, (5, 5), 0)
@@ -219,18 +218,15 @@ class ImageProjection(Node):
         black = (0, 0, 0)
         cv_image_homography = cv2.fillPoly(cv_image_homography, [triangle1, triangle2], black)
 
+        # ARX: the camera's header carried through, so the frame keeps the
+        # time it was taken. Without it the stamp was 0, and detect_lane's
+        # /detect/lane_latency_ms - which needs that time - never published.
         if self.pub_image_type == 'compressed':
-            self.pub_image_projected.publish(
-                self.cvBridge.cv2_to_compressed_imgmsg(
-                    cv_image_homography, 'jpg'
-                )
-            )
+            msg_out = self.cvBridge.cv2_to_compressed_imgmsg(cv_image_homography, 'jpg')
         elif self.pub_image_type == 'raw':
-            self.pub_image_projected.publish(
-                self.cvBridge.cv2_to_imgmsg(
-                    cv_image_homography, 'bgr8'
-                )
-            )
+            msg_out = self.cvBridge.cv2_to_imgmsg(cv_image_homography, 'bgr8')
+        msg_out.header = msg_img.header
+        self.pub_image_projected.publish(msg_out)
 
 
 def main(args=None):
