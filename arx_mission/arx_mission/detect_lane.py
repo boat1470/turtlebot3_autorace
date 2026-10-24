@@ -37,6 +37,8 @@
 #   6. The 600-iteration Python loop counting non-empty mask rows is a numpy
 #      call, and does not assume the image is 600 rows tall.
 
+import traceback
+
 import cv2
 from cv_bridge import CvBridge
 import numpy as np
@@ -51,6 +53,9 @@ from std_msgs.msg import Float64
 from std_msgs.msg import UInt8
 
 # ARX: /arx/follow_side - must match mission_control.py.
+# ARX: a lane fit needs points spread over at least this many rows.
+MIN_FIT_ROWS = 10
+
 FOLLOW_AUTO = 0
 FOLLOW_YELLOW = 1
 FOLLOW_WHITE = 2
@@ -356,6 +361,22 @@ class DetectLane(Node):
         return SetParametersResult(successful=True)
 
     def cbFindLane(self, image_msg):
+        """One frame, and an exception in it costs that frame only (ARX).
+
+        rclpy lets an exception in a subscription callback propagate out of
+        spin, and the node exits: /detect/lane stops, control_lane stops
+        steering, and the robot stands where it is (run 1023_1901). The
+        traceback goes to /rosout, so a bag records what broke.
+        """
+        try:
+            self.fnFindLane(image_msg)
+        except Exception:
+            self.lane_errors = getattr(self, 'lane_errors', 0) + 1
+            self.get_logger().error(
+                f'frame dropped, exception #{self.lane_errors}:\n{traceback.format_exc()}',
+                throttle_duration_sec=1.0)
+
+    def fnFindLane(self, image_msg):
         # Change the frame rate by yourself. Now, it is set to 1/3 (10fps).
         # Unappropriate value of frame rate may cause huge delay on entire recognition process.
         # This is up to your computer's operating power.
@@ -656,8 +677,21 @@ class DetectLane(Node):
         # fit" out loud is the same answer without hiding anything else.
         if len(y) < 3:
             return None, None
-
-        lane_fit = np.polyfit(y, x, 2)
+        # ARX: points that do not span rows cannot be fitted as x = f(y).
+        # Run 1023_1901, 77.5 s: the robot arcing over a construction board,
+        # both lines gone, a white smear along the top edge of the frame -
+        # every point in the band round the old fit on row 0. polyfit
+        # scaled the y column by zero, got NaN, and raised LinAlgError
+        # ("SVD did not converge"), which killed the node; /detect/lane
+        # stopped and the robot sat still. Reproduced from the recorded mask.
+        if np.ptp(y) < MIN_FIT_ROWS:
+            return None, None
+        try:
+            lane_fit = np.polyfit(y, x, 2)
+        except (np.linalg.LinAlgError, ValueError):
+            return None, None
+        if not np.all(np.isfinite(lane_fit)):
+            return None, None
 
         ploty = np.linspace(0, image.shape[0] - 1, image.shape[0])
         lane_fitx = lane_fit[0] * ploty ** 2 + lane_fit[1] * ploty + lane_fit[2]
@@ -719,7 +753,13 @@ class DetectLane(Node):
         y = nonzeroy[lane_inds]
 
         try:
+            # ARX: see fit_from_lines - too few rows is a failed fit too, and
+            # so is a fit that came back NaN without raising.
+            if len(y) < 3 or np.ptp(y) < MIN_FIT_ROWS:
+                raise ValueError('points do not span enough rows')
             lane_fit = np.polyfit(y, x, 2)
+            if not np.all(np.isfinite(lane_fit)):
+                raise ValueError('fit is not finite')
             # ARX: keyed by lane. A single shared attribute meant a failed
             # fit on one lane fell back to the other lane's curve, which is
             # half a lane away by construction.
