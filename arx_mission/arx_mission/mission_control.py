@@ -446,6 +446,12 @@ class MissionControl(Node):
         # Stop where the sign was found. The debug step: nothing is built on
         # top of this yet.
         self.declare_parameter('construction.stop_after_detect', True)
+        # ARX: false - the construction sign is not used at all, like
+        # parking.use_sign. The boards are taken to be next once the robot
+        # has faced within construction.heading (0 +/- 45) for
+        # construction.heading_hold_s without a break.
+        self.declare_parameter('construction.use_sign', True)
+        self.declare_parameter('construction.heading_hold_s', 2.0)
         # ARX: a bench aid. Stop in drive_to_construction the moment the
         # white line drops out of the lane estimate - lane_state 0 or 1 for
         # white_lost_ticks ticks in a row - so where and why it went can be
@@ -633,6 +639,11 @@ class MissionControl(Node):
         # top of it yet.
         self.declare_parameter('parking.stop_after_detect', True)
         self.declare_parameter('parking.give_up_s', 120.0)
+        # ARX: false leaves the parking sign out altogether: the watch for
+        # 17B starts once the robot has faced within parking.heading for
+        # parking.heading_hold_s without a break.
+        self.declare_parameter('parking.use_sign', True)
+        self.declare_parameter('parking.heading_hold_s', 2.0)
         # The board sits at (0.74, 1.95) turned -90 degrees in the world
         # file, the same as the others, so it can only be read along the
         # world x axis. 180 is looking towards -x.
@@ -2193,15 +2204,28 @@ class MissionControl(Node):
         # before this while it runs, and hands back itself when it ends.
         self.set_avoid(False)
 
-        winner, votes = self.sign_majority({SIGN_CONSTRUCTION})
+        winner, votes, how = None, 0, None
+        if self.get_parameter('construction.use_sign').value:
+            winner, votes = self.sign_majority({SIGN_CONSTRUCTION})
+        elif self.heading_ok('construction') and self.yaw is not None:
+            # ARX: construction.use_sign false - the heading stands in for it.
+            if getattr(self, 'con_head_since', None) is None:
+                self.con_head_since = now
+            held_s = now - self.con_head_since
+            if held_s >= self.get_parameter('construction.heading_hold_s').value:
+                winner = SIGN_CONSTRUCTION
+                how = (f'facing {self.yaw:+.1f} deg for {held_s:.1f} s '
+                       f'(construction sign not used)')
+        else:
+            self.con_head_since = None
         if winner is not None:
             # Here is where the steering goes back to both lines.
             self.construction_seen = True
             self.set_follow_side(FOLLOW_AUTO)
-            self.get_logger().info(
+            self.get_logger().info(how or (
                 f'construction sign confirmed: {votes} of the last '
                 f'{len(self.fresh_votes())} reports '
-                f'({self.sign_msgs} seen, {self.sign_rejected} ignored on heading)')
+                f'({self.sign_msgs} seen, {self.sign_rejected} ignored on heading)'))
             if self.get_parameter('construction.stop_after_detect').value:
                 self.stop('construction sign - stopping here, as asked')
             elif self.get_parameter('construction.avoid.enabled').value:
@@ -2625,7 +2649,7 @@ class MissionControl(Node):
         # ARX: the sign is latched, then both lines have to hold for
         # parking.both_lines_s before the steering goes over to yellow - the
         # moment the road is back to one ordinary lane with both lines in it.
-        if self.parking_sign_at is None:
+        if self.parking_sign_at is None and self.get_parameter('parking.use_sign').value:
             winner, votes = self.sign_majority({SIGN_PARKING})
             if winner is not None:
                 self.parking_sign_at = now
@@ -2634,6 +2658,23 @@ class MissionControl(Node):
                     f'{len(self.fresh_votes())} reports '
                     f'({self.sign_msgs} seen, {self.sign_rejected} ignored on '
                     f'heading) - waiting for both lines')
+        # ARX: the sign only switches on the watch for 17B - the turn itself
+        # waits for both lines and then the yellow line going - so with
+        # parking.use_sign false the heading does it instead: within
+        # parking.heading for heading_hold_s in a row. Run 1023_2047 passed
+        # the board side on, read it zero times, and drove past the lot.
+        if not self.get_parameter('parking.use_sign').value and self.parking_sign_at is None:
+            if self.heading_ok('parking') and self.yaw is not None:
+                if getattr(self, 'park_head_since', None) is None:
+                    self.park_head_since = now
+                held_s = now - self.park_head_since
+                if held_s >= self.get_parameter('parking.heading_hold_s').value:
+                    self.parking_sign_at = now
+                    self.get_logger().info(
+                        f'facing {self.yaw:+.1f} deg for {held_s:.1f} s '
+                        f'(parking sign not used) - waiting for both lines')
+            else:
+                self.park_head_since = None
         if self.both_lines():
             if self.both_since is None:
                 self.both_since = now

@@ -291,6 +291,13 @@
       # Stop where the sign was found. The debug step from while the
       # detection was being trusted. Off now that there is a stage after it.
       stop_after_detect: false
+      # false (2026-10-24): the construction sign is not used at all, like
+      # parking.use_sign. The boards are taken to be next once the robot has
+      # faced within construction.heading (0 +/- 45) for heading_hold_s in a
+      # row. On the runs of 2026-10-23 that came ~2 s before the sign was
+      # confirmed (31.0-31.4 s against 32.9-33.4) and ~8 s before board 1.
+      use_sign: false
+      heading_hold_s: 2.0
       # Stop the moment the white line drops out (lane_state 0 or 1 for
       # white_lost_ticks ticks) on the way to the sign - to see where and
       # why with the robot standing there. Ends the run: false to score.
@@ -561,10 +568,19 @@
     parking:
       enabled: true
       window: 7
-      # 2, not 5 (2026-10-23): run 1023_1750 got only three parking reports,
-      # all real (5-7 inliers, 33-45 px), in the 0.35 s the board was in
-      # view, and never turned into the lot; good runs that day had 9-14.
-      confirm_votes: 2
+      # 1, not 5 (2026-10-23): run 1023_1750 got three parking reports, all
+      # real, in the 0.35 s the board was in view; run 1023_2034 got one, the
+      # board at the edge of the frame and seen side on. Good runs that day
+      # had 9-14. One report is enough to start watching for 17B - the turn
+      # still waits for both lines and then the yellow line going.
+      confirm_votes: 1
+      # false: the parking sign is not used at all. The watch for 17B starts
+      # once the robot has faced within parking.heading (180 +/- 45) for
+      # heading_hold_s in a row; the turn into the lot still waits for both
+      # lines and then the yellow line going. Run 1023_2047 read the board
+      # zero times and drove past the lot.
+      use_sign: false
+      heading_hold_s: 2.0
 
       # Six, like the construction board and for the same reason: this one
       # is passed side-on while the robot drives, not stared at.
