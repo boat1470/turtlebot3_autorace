@@ -101,6 +101,8 @@ FULL_LAUNCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
                            'arx_mission', 'launch', 'full.launch.py')
 MISSION_CMD = 'ros2 launch arx_mission full.launch.py sim:=false start:={}'
 SKIP_LEVEL = ' skip_level:=true'
+# Where the launcher's output is kept, a file a day - see Window.save_line.
+RUNS_DIR = os.path.expanduser('~/runs')
 # Mission 5 read by the camera (detect_level) instead of the Pi's HC-SR04.
 LEVEL_CAMERA = ' level_source:=camera'
 # detect_lane's white and yellow masks - full.launch leaves them off, so the
@@ -677,7 +679,9 @@ class Window:
         if self.out:
             at_end = self.log.yview()[1] > 0.999
             while self.out:
-                self.log.insert('end', self.out.popleft() + '\n')
+                line = self.out.popleft()
+                self.log.insert('end', line + '\n')
+                self.save_line(line)
             extra = int(self.log.index('end-1c').split('.')[0]) - LOG_LINES
             if extra > 0:
                 self.log.delete('1.0', f'{extra + 1}.0')
@@ -696,6 +700,23 @@ class Window:
                 text='1  stop all' if any(j.running() for j in self.calib)
                 else '1  start all')
         self.root.after(200, self.tick)
+
+    def save_line(self, line):
+        """Append one output line to ~/runs/launcher_<MMDD>.log (ARX).
+
+        The window keeps only LOG_LINES, and a node's traceback goes to this
+        output and nowhere else - detect_lane died in run 1023_1901 and its
+        traceback was gone with the window. One file per day, timestamped.
+        """
+        try:
+            if getattr(self, 'log_file', None) is None:
+                os.makedirs(RUNS_DIR, exist_ok=True)
+                self.log_file = open(os.path.join(
+                    RUNS_DIR, time.strftime('launcher_%m%d.log')), 'a', encoding='utf-8')
+            self.log_file.write(time.strftime('%H:%M:%S ') + line + '\n')
+            self.log_file.flush()
+        except OSError:
+            self.log_file = False         # stop trying; the window still shows it
 
     def close(self):
         """Stop everything, wait for it, then go."""
