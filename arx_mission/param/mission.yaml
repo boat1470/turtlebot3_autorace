@@ -317,6 +317,14 @@
         until: both
         min_s: 0.3
         timeout_s: 0.0
+        # 5B only - an arc starting within 5b_window_s of leaving the
+        # junction: once odom comes round to 5b_end_heading_deg (turning
+        # right, so from above), lane following takes over, both lines or
+        # not. Run 1023_2123 started it at +110, had both for 0.09 s, then
+        # white only, and circled until lifted. 7A, 6 s and more later,
+        # keeps arcing until both (2039: 140 degrees).
+        5b_window_s: 2.0
+        5b_end_heading_deg: 90.0
 
       # Measured from the moment the junction is behind us, and the board is
       # most of the way round the course from there.

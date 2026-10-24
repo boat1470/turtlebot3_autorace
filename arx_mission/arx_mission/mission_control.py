@@ -467,6 +467,13 @@ class MissionControl(Node):
         self.declare_parameter('construction.white_lost_arc.until', 'both')
         self.declare_parameter('construction.white_lost_arc.min_s', 0.3)
         self.declare_parameter('construction.white_lost_arc.timeout_s', 3.0)
+        # ARX: an arc that starts within 5b_window_s of leaving the junction
+        # is in 5B, not 7A. There it also ends once odom has come round to
+        # 5b_end_heading_deg (the arc turns right, so from above), both lines
+        # or not, and lane following takes over. Run 1023_2123 saw both for
+        # 0.09 s in 5B, then white only, and circled until lifted.
+        self.declare_parameter('construction.white_lost_arc.5b_window_s', 2.0)
+        self.declare_parameter('construction.white_lost_arc.5b_end_heading_deg', 90.0)
         self.declare_parameter('construction.give_up_s', 120.0)
         # The board is turned -90 degrees in the world file like the arrow
         # is, so its broad faces are normal to the world x axis and it can
@@ -1218,6 +1225,7 @@ class MissionControl(Node):
         self.lot_pair_lost = 0
         self.wl_arc_since = None        # ARX: white_lost_arc running since
         self.wl_arc_back = 0
+        self.wl_arc_5b = False          # ARX: this arc is the one in 5B
         # ARX: ticks in a row with both yellow walls, and whether that has
         # released the slow-down for the rest of the way in.
         self.lot_pair_ticks = 0
@@ -2110,9 +2118,13 @@ class MissionControl(Node):
         found = (1, 2) if until == 'yellow' else (2,)   # yellow_pair: 2 in pair mode
         self.wl_arc_back = self.wl_arc_back + 1 if self.lane_state in found else 0
         need = self.get_parameter(p + 'back_ticks').value
+        end = self.get_parameter(p + '5b_end_heading_deg').value
         why = None
         if self.wl_arc_back >= need and elapsed >= self.get_parameter(p + 'min_s').value:
             why = f'{until} for {need} ticks'
+        elif (self.wl_arc_5b and self.yaw is not None
+              and (self.yaw - end + 180.0) % 360.0 - 180.0 <= 0.0):
+            why = f'5B, round to {end:+.0f} deg without {until}, lane_state {self.lane_state}'
         elif 0 < self.get_parameter(p + 'timeout_s').value <= elapsed:
             why = f'{elapsed:.1f} s up, lane_state {self.lane_state}'
         if why is not None:
@@ -2163,6 +2175,8 @@ class MissionControl(Node):
                 self.white_lost_ticks = 0
                 if arc_on:
                     self.wl_arc_since, self.wl_arc_back = now, 0
+                    self.wl_arc_5b = (now - self.stage_since <= self.get_parameter(
+                        'construction.white_lost_arc.5b_window_s').value)
                     if self.get_parameter('construction.white_lost_arc.until').value == 'yellow_pair':
                         self.set_follow_side(FOLLOW_YELLOW_PAIR)
                     self.get_logger().info(
