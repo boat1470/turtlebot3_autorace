@@ -2778,8 +2778,15 @@ class MissionControl(Node):
         lead = math.degrees(w) / max(g('rate_hz').value, 0.1) * 0.5
         done = self.yaw is not None and self.heading_off(target, self.yaw) <= lead
         if done or took >= g(p + 'timeout_s').value:
-            self.set_avoid(True, angular=0.0, linear=0.0)
-            self.set_avoid(False)
+            # ARX: keep the wheel, holding the arc's heading at speed, rather
+            # than a stop and a release. drive_to_lot holds the same heading
+            # until the yellow pair is in view; released here, control_lane
+            # had one tick on a single yellow and sent -0.80 at 0.146 m/s -
+            # a jolt into the corridor (run 1024_1820).
+            w_hold = self.correction_to(target)
+            self.set_avoid(True, angular=w_hold, linear=max(0.0, min(
+                g('lot.speed').value,
+                g('lot.wheel_max').value - abs(w_hold) * g('lot.half_track').value)))
             self.park_arc_phase = None
             # drive_to_lot then follows the yellow pair - no slow approach,
             # no waiting for the heading to settle - and locks the arc's own
@@ -2876,7 +2883,7 @@ class MissionControl(Node):
             # then the arc's heading. No slow approach, no settling.
             p = 'parking.left_arc.'
             self.set_follow_side(FOLLOW_YELLOW_PAIR)
-            if self.lot_pair_seen:
+            if self.lot_pair_seen and self.lane_state == 2:
                 self.set_avoid(False)
             else:
                 # Not the lane until the pair is really there: odom holds the
@@ -2885,6 +2892,11 @@ class MissionControl(Node):
                 # took the right wall for the left line and turned the robot
                 # from -90 to -114 in the pair_wait_s second (run 1017_2303).
                 # A pair - two yellows a lane apart - is not fooled that way.
+                #
+                # And the same the moment the pair drops out at the end of the
+                # walls, not pair_lost_ticks later: detect_lane stops publishing
+                # there, and control_lane kept relaying the last frame's -0.63
+                # for three ticks - the nose swung to -104.7 (run 1024_1732).
                 target = self.get_parameter(p + 'end_heading_deg').value
                 w = self.correction_to(target)
                 v = min(self.get_parameter('lot.speed').value,
