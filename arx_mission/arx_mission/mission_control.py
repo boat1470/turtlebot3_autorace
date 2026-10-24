@@ -250,6 +250,15 @@ class MissionControl(Node):
         # Stop once the arrow is identified instead of acting on it. Purely
         # a debug aid now that there is something to hand over to.
         self.declare_parameter('intersection.stop_after_detect', False)
+        # ARX: look for the left arrow only. Right reports are not counted; a
+        # left is taken on left_only.confirm_votes left reports in the window,
+        # and if odom comes round to left_only.right_at_deg (turning left,
+        # inside the heading gate) without one, the arrow is taken as right.
+        # The right arm far off is a 7-10 px disc that was read too seldom,
+        # or the lowered left arm read in its place (1023_2258, 1023_2324).
+        self.declare_parameter('intersection.left_only.enabled', False)
+        self.declare_parameter('intersection.left_only.confirm_votes', 3)
+        self.declare_parameter('intersection.left_only.right_at_deg', 155.0)
         # Measured from the moment the robot is released, not from the sign
         # coming into view, so it has to cover the whole approach.
         self.declare_parameter('intersection.give_up_s', 40.0)
@@ -1672,14 +1681,26 @@ class MissionControl(Node):
         self.set_armed(MISSION_INTERSECTION)
 
         winner, votes = self.sign_majority()
+        how = None
+        if self.get_parameter('intersection.left_only.enabled').value:
+            # ARX: see intersection.left_only.
+            lefts = self.fresh_votes().count(SIGN_LEFT)
+            right_at = self.get_parameter('intersection.left_only.right_at_deg').value
+            winner = None
+            if lefts >= self.get_parameter('intersection.left_only.confirm_votes').value:
+                winner, votes = SIGN_LEFT, lefts
+            elif self.heading_ok('intersection') and self.edge_reached(right_at, 1):
+                winner = SIGN_RIGHT
+                how = (f'no left arrow by {self.yaw:+.1f} deg (right_at {right_at:+.0f}, '
+                       f'{lefts} left reports) - taking it as right')
         if winner is not None:
             self.decision = winner
             name = SIGN_NAMES[winner]
-            self.get_logger().info(
+            self.get_logger().info(how or (
                 f'sign {name} confirmed: {votes} of the last '
                 f'{len(self.fresh_votes())} reports '
                 f'({self.sign_msgs} reports seen, {self.sign_rejected} '
-                f'ignored on heading)')
+                f'ignored on heading)'))
             if self.get_parameter('intersection.stop_after_detect').value:
                 self.stop(f'sign {name} - stopping here, as asked')
             elif (SIDE_FOR_SIGN.get(winner) == FOLLOW_YELLOW and

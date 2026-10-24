@@ -125,7 +125,7 @@ class DetectSign(Node):
         for key, default in (('hue_l', 95), ('hue_h', 130), ('sat_l', 80), ('val_l', 40),
                              ('sat_h', 255), ('val_h', 255),
                              ('min_area', 40.0), ('max_area', 4000.0), ('min_round', 0.75),
-                             ('min_white', 6), ('white_delta', 25.0),
+                             ('min_fill', 0.30), ('min_white', 6), ('white_delta', 25.0),
                              ('min_offset_px', 1.5), ('roi_y_min', 0.0), ('roi_y_max', 1.0)):
             self.declare_parameter(f'sign.arrow.{key}', default)
 
@@ -421,6 +421,14 @@ class DetectSign(Node):
             rnd = min(w, h) / max(w, h)
             if rnd < g('min_round'):
                 rejects.append((box, f'round {rnd:.2f}'))
+                continue
+            # A disc fills its box (~0.5 with the arrow cut out of it); a thin
+            # curved sliver does not, though its box can be square. Run
+            # 1023_2105 read left off one at the frame's right edge, fill ~0.15,
+            # while the real discs were 0.43-0.64.
+            fill = area / float(w * h)
+            if fill < g('min_fill'):
+                rejects.append((box, f'fill {fill:.2f}'))
                 continue
             disc = (lab[y:y + h, x:x + w] == i).astype(np.uint8) * 255
             filled = disc.copy()

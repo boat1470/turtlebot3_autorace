@@ -55,6 +55,16 @@
       # robot it is also the first question - does it see the sign at all.
       stop_after_detect: false #
 
+      # Left arrow only (2026-10-24): right reports are not counted. Left on
+      # confirm_votes left reports; facing right_at_deg (turning left, in the
+      # heading gate) with fewer, it is taken as right and the right arc runs
+      # as before. The far right arm is a 7-10 px disc, read too seldom
+      # (1023_2324) or the lowered left arm read in its place (1023_2258).
+      left_only:
+        enabled: true
+        confirm_votes: 3
+        right_at_deg: 155.0
+
       # Distance from the start line to the intersection sign is under two
       # metres, which at 0.05 m/s is about 40 s of driving. This is measured
       # from the moment the robot is released, not from the sign coming into
@@ -136,7 +146,7 @@
         # is the number to put here.
         align: true
         align_heading_deg: 180.0
-        align_tolerance_deg: 5.0
+        align_tolerance_deg: 10.0
         align_speed: 0.14
         align_rate: 0.7      # rad/s, magnitude; turns whichever way is shorter
         align_timeout_s: 2.0

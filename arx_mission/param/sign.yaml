@@ -143,17 +143,19 @@
         hue_l: 80          # blue, OpenCV H 0-179
         hue_h: 130
         sat_l: 50
-        val_l: 40
+        val_l: 25          # the raised disc far off is dark navy, V 28-47: at 40 half of it fell out and it was under min_area (1023_2324)
         sat_h: 255         # upper ends, there in case they are ever wanted -
         val_h: 255         # leave at 255: a bluer, brighter disc is only clearer
-        min_area: 40.0     # px^2 of the blue blob; the far disc was 170
+        min_area: 25.0     # px^2 of the blue blob; the raised disc far off at the junction is 30-38 (1023_2258)
         max_area: 4000.0
-        min_round: 0.50    # min side / max side; the lowered arm is ~0.6
+        min_round: 0.65    # min side / max side; the lowered arm lying flat is 0.50-0.58, the raised disc 0.70-0.80 (1023_2258)
+        min_fill: 0.30     # blue px / box px; discs 0.43-0.64, the 1023_2105 false-left sliver ~0.15
         min_white: 6       # white px inside the disc; the far disc had 37
         white_delta: 25.0  # white = this much brighter than the disc's mean
         min_offset_px: 1.0 # |head x - stem x|; the far discs had 2.8 (left), 1.6 (right)
         roi_y_min: 0.3     # search band, fractions of the height from the top:
-        roi_y_max: 0.8     # rows above min and below max are blanked (0 / 1 = all)
+        roi_y_max: 0.65    # rows above min and below max are blanked (0 / 1 = all); the floor glare
+                           # by the white line sits at 0.7-0.8, the board never below ~0.6
 
       # Empty means arx_mission's own image/ directory, whose README explains
       # why the ones in turtlebot3_autorace_detect are not used here. Set this
