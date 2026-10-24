@@ -865,21 +865,30 @@
         # robot 0.225 m across its diagonal, so there is no room for an arc.
         turn_deg: 90.0
         # 1.5 on 2026-10-13 (was 0.6); slow_within_deg eases the end of it.
-        turn_rate: 1.5
+        # 2.4 on 2026-10-24 with turn_lead_s: 0.192 m/s on each wheel. 2.2
+        # without the lead came to rest 25 deg past (1024_1340).
+        turn_rate: 2.4
         # Phase 0 turns to an odom heading instead of through turn_deg:
         # tail to the bay, robot stopped facing -90 down the lot. Facing up
         # (180) backs into its left bay, facing down (0) into its right.
         absolute: true
         face_left_deg: 180.0
         face_right_deg: -5.0
-        slow_within_deg: 20.0
+        # 40 on 2026-10-24 (was 20): at 2.4 rad/s a 10 Hz tick is ~14 deg, so
+        # 20 was barely one tick and the stop landed anywhere from -32 to -15
+        # (1024_1716, 1024_1721). Slower near the end, finer steps.
+        slow_within_deg: 40.0
+        # Stop the turn this much early, at the rate it is turning then: /odom
+        # runs ~0.1-0.15 s behind. Too far past -> raise; short -> lower.
+        turn_lead_s: 0.26         # 0.26 on 2026-10-24: 0.30 came to rest at -10 and -11.4, ~32 deg after the stop at ~120 deg/s (1024_1755, 1024_1805)
 
         speed: 0.04
         # The reverse into the bay (0 = speed). 0.15 on 2026-10-13: the bay is
         # 0.15-0.22 m deep, ~1.5 s. Ended reverse_lead_ticks of travel early
         # (22 mm at 0.15) - odometry is a tick behind the command. If it
         # stops short of into_*_m, lower this; if it overruns, raise it.
-        reverse_speed: 0.15
+        # 0.20 on 2026-10-24: 1024_1340 backed in straight at it.
+        reverse_speed: 0.20
         reverse_lead_ticks: 1.5
         # The way out, 2026-10-13. exit_speed for the arc and the straight
         # (0 = speed); the arc is cut to keep the outer wheel inside
@@ -901,7 +910,7 @@
         # x 0.258 are therefore 0.278 and 0.218 away. A single figure would
         # leave 4 mm at one end of a bay with only 68 mm to give.
         into_left_m: 0.20      # 2026-10-13, on the real course (0.278 was the simulator)
-        into_right_m: 0.22     # 2026-10-13, on the real course (0.218 was the simulator)
+        into_right_m: 0.20     # 0.20 on 2026-10-24 (was 0.22). Deepest is ~4 cm past this (the robot coasts after the stop): 0.18 gave 0.216, the bay centre (1024_1755)
 
         # Stand still in the bay. Zero is what was asked for; the knob is
         # here because being seen stopped in it may be what actually scores.

@@ -823,6 +823,11 @@ class MissionControl(Node):
         self.declare_parameter('bay.park.face_left_deg', 180.0)
         self.declare_parameter('bay.park.face_right_deg', 0.0)
         self.declare_parameter('bay.park.slow_within_deg', 20.0)
+        # ARX: stop the turn this many seconds of it early, at the rate it is
+        # turning then. /odom is a tick or so behind the wheels, and run
+        # 1024_1340 (2.2 rad/s) came to rest 25 deg past face_right_deg. The
+        # same lead the exit arc already takes. 0 = stop on the heading.
+        self.declare_parameter('bay.park.turn_lead_s', 0.0)
         # ARX: the reverse into the bay at its own speed (0 = bay.park.speed),
         # ended reverse_lead_ticks of travel early so the stop lands on
         # into_*_m: odometry reports a tick behind the command.
@@ -3193,14 +3198,16 @@ class MissionControl(Node):
                 if slow > 0:
                     rate *= min(1.0, max(abs(left) / slow, 0.25))
                 self.set_avoid(True, angular=way * rate, linear=0.0)
+                lead = math.degrees(rate) * self.get_parameter('bay.park.turn_lead_s').value
                 # Turned past it, or turned the long way round by more than
                 # half a turn - the heading has been crossed either way.
-                there = left <= 0.0 or swept > 270.0
+                there = left <= lead or swept > 270.0
             else:
                 self.set_avoid(True, angular=way * rate, linear=0.0)
                 there = swept >= self.get_parameter('bay.park.turn_deg').value
             if there:
-                self.park_next('reversing into the bay', now)
+                where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+                self.park_next(f'reversing into the bay (turn stopped at {where})', now)
 
         elif self.park_phase == 1:
             back = self.get_parameter('bay.park.reverse_speed').value or speed
