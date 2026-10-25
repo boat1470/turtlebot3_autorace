@@ -5,10 +5,10 @@
 
 """The level crossing bar, read with the HC-SR04 on the front of the robot.
 
-Runs on the Pi - the sensor is wired to its GPIO - and publishes the same
-/detect/level_bar and /detect/level_range as detect_level.launch.py, so start
-one or the other, never both. full.launch.py leaves the camera one off with
-sim:=false (or level_source:=ultrasonic).
+Runs on the Pi - the sensor is wired to its GPIO - and publishes only
+/detect/level_range, the distance; mission_control decides from it. The
+camera detector (detect_level.launch.py) publishes /detect/level_range too,
+so the two still cannot run side by side until one of them is renamed.
 
 It stays idle until mission_control arms it on /arx/armed_mission.
 always_on:=true measures regardless, which is how to check the wiring:

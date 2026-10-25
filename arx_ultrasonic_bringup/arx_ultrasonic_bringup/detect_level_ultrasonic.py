@@ -17,10 +17,10 @@ mission and change without touching the Pi:
 
     /detect/level_range   Float32  metres to the nearest echo ahead, every
                                    reading; max_m when there is none
-    /detect/level_bar     UInt8    1 up / 2 down by down_m - for lane_debug
-                                   and the camera detector's old meaning only;
-                                   mission_control does not use it with the
-                                   ultrasonic (level.use_range)
+
+Nothing else. It used to publish /detect/level_bar too, up/down by its own
+down_m, which nothing decided on and which clashed with the camera
+detector's /detect/level_bar (2026-10-24).
 
 One threshold could not serve both ends: starting to slow wants something
 far (0.45 m), and deciding the bar is up once the robot stands 0.10 m from
@@ -65,11 +65,6 @@ except ImportError:  # not a Pi, or python3-lgpio not installed
 # Must match mission_control.py and detect_level.py.
 MISSION_LEVEL = 5
 
-BAR_NONE = 0
-BAR_UP = 1
-BAR_DOWN = 2
-BAR_NAMES = {BAR_NONE: 'nothing', BAR_UP: 'up', BAR_DOWN: 'down'}
-
 # Large rather than zero, so `range <= stop_m` does not read silence as
 # "arrived". The same value detect_level uses.
 RANGE_NONE = 9.9
@@ -86,19 +81,16 @@ class DetectLevelUltrasonic(Node):
         self.declare_parameter('level.ultrasonic.trig_pin', 23)
         self.declare_parameter('level.ultrasonic.echo_pin', 24)
         self.declare_parameter('level.ultrasonic.rate_hz', 15.0)
-        self.declare_parameter('level.ultrasonic.down_m', 0.45)
         self.declare_parameter('level.ultrasonic.max_m', 2.0)
         self.declare_parameter('level.ultrasonic.window', 5)
         self.declare_parameter('level.always_on', False)
 
         self.armed = 0
-        self.bar = None
         self.readings = []
         self.rise_ns = None
         self.echo_ns = None
         self.waiting = False
 
-        self.pub_bar = self.create_publisher(UInt8, '/detect/level_bar', 10)
         self.pub_range = self.create_publisher(Float32, '/detect/level_range', 10)
         self.create_subscription(UInt8, '/arx/armed_mission', self.on_armed, 1)
 
@@ -203,18 +195,8 @@ class DetectLevelUltrasonic(Node):
         del self.readings[:-window]
         median = statistics.median(self.readings)
 
-        down_m = self.get_parameter('level.ultrasonic.down_m').value
-        bar = BAR_DOWN if median < down_m else BAR_UP
-
-        self.pub_bar.publish(UInt8(data=bar))
-        # Every reading, down or not - mission_control decides from the range.
+        # Every reading - mission_control decides from the range.
         self.pub_range.publish(Float32(data=float(median)))
-
-        if bar != self.bar:
-            self.bar = bar
-            self.get_logger().info(
-                f'level bar -> {BAR_NAMES[bar]} ({median:.2f} m, '
-                f'median of {len(self.readings)})')
 
     def destroy_node(self):
         self.fnCloseGpio()
