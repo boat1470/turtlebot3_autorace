@@ -974,10 +974,12 @@
     # 13.1 s is 0.91 m at this speed against 0.30 m to cover, so the robot
     # reaches the stop with about nine seconds in hand.
     level:
-      # ARX 2026-10-18: on, read by the HC-SR04 on the robot (full.launch
-      # level_source auto -> ultrasonic with sim:=false; start "level
-      # ultrasonic" on the Pi). skip_level:=true (launcher: "skip mission 5")
-      # leaves it out for one run; false here leaves it out for good.
+      # ARX: on. What reads the bar is not set here - level.source comes from
+      # full.launch level_source (launcher: "mission 5 bar by"), which wins
+      # over this file. Camera by default since 2026-10-25; ultrasonic and
+      # both need "level ultrasonic" started on the Pi. skip_level:=true
+      # (launcher: "skip mission 5") leaves it out for one run; false here
+      # leaves it out for good.
       enabled: true
 
       # Only take "bar down" while facing the road the crossing is on. The
@@ -1014,7 +1016,10 @@
         # 0.70 on 2026-10-20 (was 0.40): the run at 01:05 saw DOWN at
         # 0.59-0.66 m and only got under 0.40 at 0.16, already past the stop.
         slow_m: 0.70
-        stop_m: 0.20
+        # 0.25 on 2026-10-24 (was 0.20): stopped at 0.19 the detector saw four
+        # bands, called it nothing on the gap spread and the robot left with the
+        # bar still down (run 1024_2343). At 0.23 it alternated 3 and 4 bands.
+        stop_m: 0.25
       # A range older than this does not count (Pi node stopped, Wi-Fi gap).
       range_max_age_s: 0.5
 
@@ -1042,6 +1047,10 @@
       # level_source is ever the camera again, which goes blind under 0.20.
       # The ultrasonic's stop. The camera has its own, camera.stop_m above.
       stop_m: 0.10
+      # ...for this many ticks in a row (ultrasonic and both; the camera
+      # stops on one). 3 on 2026-10-24: run 1024_2321 stopped on a single
+      # stray 0.08 with the bar still ~0.30 m away.
+      stop_ticks: 3
 
       speed: 0.04
       # 2026-10-18: up to the bar following the lane, at no more than

@@ -6,7 +6,8 @@
 """The level crossing bar detector.
 
 Reports whether the bar is up, down, or not in view, on /detect/level_bar,
-and how far away it is on /detect/level_range. It decides nothing -
+and how far away it is on /detect/level_range_cam (the ultrasonic has
+/detect/level_range). It decides nothing -
 mission_control reads the report and chooses when to creep and when to
 stand - so this node never touches /cmd_vel, /avoid_control or /avoid_active.
 
@@ -66,6 +67,9 @@ def generate_launch_description():
             ('/detect/image_input', '/camera/image_compensated'),
             ('/detect/image_output/compressed', '/detect/image_level/compressed'),
             ('/detect/image_output_sub1/compressed', '/detect/image_level_mask/compressed'),
+            # ARX: its own name, so the ultrasonic on the Pi can publish
+            # /detect/level_range at the same time (level_source:=both).
+            ('/detect/level_range', '/detect/level_range_cam'),
         ]
     )
 

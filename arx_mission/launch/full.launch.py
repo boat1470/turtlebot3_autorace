@@ -29,12 +29,13 @@ Arguments:
                         rqt_reconfigure works - this package's detectors
                         register their parameter callbacks in every mode.
     debug_image:=true   publish the lane mask images
-    level_source:=camera|ultrasonic
-                        what reports the crossing bar. Defaults to camera in
-                        the simulator and ultrasonic without it; the
-                        ultrasonic node runs on the Pi and is started there
+    level_source:=camera|ultrasonic|both
+                        what reports the crossing bar. Defaults to camera;
+                        the ultrasonic node runs on the Pi and is started there
                         (arx_ultrasonic_bringup), this only keeps the
-                        camera one off
+                        camera one off. both: the camera's DOWN starts the
+                        creep, the ultrasonic stops it and says lifted - start
+                        the ultrasonic on the Pi as well
     skip_level:=true    leave out the level crossing and go straight on to
                         the tunnel
     nav:=false          no Nav2 - the tunnel mission stops at the front. On
@@ -337,11 +338,15 @@ def stack(context, *unused_args, **unused_kwargs):
 
     level_source = LaunchConfiguration('level_source').perform(context)
     if level_source == 'auto':
-        level_source = 'camera' if is_sim else 'ultrasonic'
-    if level_source not in ('camera', 'ultrasonic'):
+        # Camera on the real robot too since 2026-10-25: the HC-SR04 read the
+        # floor or the robot at 0.04-0.47 m standing still and let the robot
+        # go with the bar down (runs 1024_2321, 1024_2329); the camera stopped
+        # at 0.25 m and waited for the bar every time (1024_2350).
+        level_source = 'camera'
+    if level_source not in ('camera', 'ultrasonic', 'both'):
         raise RuntimeError(
             f'level_source:={level_source} is not a source. '
-            f'Known: auto, camera, ultrasonic')
+            f'Known: auto, camera, ultrasonic, both')
 
     simulator = include('turtlebot3_gazebo', 'turtlebot3_autorace_2020.launch.py',
                         condition=IfCondition(sim))
@@ -375,7 +380,7 @@ def stack(context, *unused_args, **unused_kwargs):
         include('arx_mission', 'detect_sign.launch.py'),
         include('arx_mission', 'detect_obstacle.launch.py'),
         *([include('arx_mission', 'detect_level.launch.py')]
-          if level_source == 'camera' else []),
+          if level_source in ('camera', 'both') else []),
         # Its final command goes to control_lane, which drives on it only
         # while mission_control holds /arx/nav_active.
         *([include('arx_mission', 'nav.launch.py', rviz='false',
@@ -474,9 +479,9 @@ def generate_launch_description():
         DeclareLaunchArgument('level_source', default_value='auto',
                               description='What reports the crossing bar: '
                                           'camera, ultrasonic (on the Pi, '
-                                          'started separately), or auto - '
-                                          'camera with sim:=true, ultrasonic '
-                                          'without.'),
+                                          'started separately), both (camera '
+                                          'for DOWN, ultrasonic for the '
+                                          'distances), or auto - camera.'),
         DeclareLaunchArgument('nav', default_value='auto',
                               description='Start Nav2 for the tunnel: true, '
                                           'false, or auto - on without the '

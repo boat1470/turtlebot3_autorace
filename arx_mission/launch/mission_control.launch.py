@@ -74,10 +74,12 @@ def generate_launch_description():
             description='Leave out the level crossing (mission 5) and go '
                         'straight on to the tunnel.'),
         DeclareLaunchArgument(
-            'level_source', default_value='ultrasonic',
+            'level_source', default_value='camera',
             description='What reads the crossing bar: ultrasonic (decide from '
                         '/detect/level_range against level.slow_m / stop_m / '
-                        'clear_m) or camera (decide from /detect/level_bar).'),
+                        'clear_m), camera (decide from /detect/level_bar and '
+                        '/detect/level_range_cam), or both (camera DOWN, then '
+                        'the ultrasonic against stop_m / clear_m).'),
     ]
 
     mission_control = Node(

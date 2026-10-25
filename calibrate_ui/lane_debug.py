@@ -176,6 +176,7 @@ class Listener(Node):
                             ('/detect/front_range', Float32),
                             ('/detect/level_bar', UInt8),
                             ('/detect/level_range', Float32),
+                            ('/detect/level_range_cam', Float32),
                             ('/detect/lane_latency_ms', Float64)):
             self.create_subscription(
                 kind, topic, lambda msg, t=topic: self.on_value(t, msg.data), 10)
@@ -247,7 +248,7 @@ RECORD_TOPICS = (
     '/detect/image_traffic_sign_mask/compressed',
     '/detect/obstacle', '/detect/obstacle_side',
     '/detect/front_range', '/arx/armed_mission', '/cmd_vel', '/odom', '/scan',
-    '/detect/level_bar', '/detect/level_range',
+    '/detect/level_bar', '/detect/level_range', '/detect/level_range_cam',
     '/rosout',
     # The tunnel on Nav2: who has the wheel, where AMCL put the robot, the
     # path it planned and whether collision_monitor was slowing it.
@@ -708,32 +709,41 @@ class Window:
                      + ('  (stale)' if b_stale else ''),
                 fg='#777' if b_stale else '#e04040' if b else '#30b050')
 
-        # crossing bar - by range against mission_control's thresholds; the
-        # camera detector sends no range while it sees nothing, so up/down then
+        # crossing bar, a line per sensor (2026-10-24): the camera detector's
+        # up/down and its range estimate (/detect/level_range_cam), and the
+        # ultrasonic's range (/detect/level_range) against mission_control's
+        # thresholds. Either can be missing - level_source picks which run.
         bar, bar_stale = get('/detect/level_bar')
-        brng, rng_stale = get('/detect/level_range')
+        crng, crng_stale = get('/detect/level_range_cam')
+        urng, urng_stale = get('/detect/level_range')
         lt = self.level_m
-        if brng is not None and brng < 9.0:
-            if brng <= lt['stop_m']:
-                zone, fg = f'STOP (<= {lt["stop_m"]:.2f})', '#e04040'
-            elif brng < lt['clear_m']:
-                zone, fg = f'DOWN (< {lt["clear_m"]:.2f})', '#e04040'
-            elif brng < lt['slow_m']:
-                zone, fg = f'SLOW (< {lt["slow_m"]:.2f})', '#e0a020'
-            else:
-                zone, fg = 'far', '#30b050'
-            self.level_text.config(
-                text=f'crossing bar: {brng:.2f} m  {zone}' + ('  (stale)' if rng_stale else ''),
-                fg='#777' if rng_stale else fg)
-        elif bar is None:
-            self.level_text.config(
-                text='crossing bar: no report - mission 5 armed? ultrasonic up?', fg='#e04040')
+        if bar is None:
+            cam = 'camera:     -'
         else:
-            state = LEVEL_BAR.get(bar, str(bar))
-            dist = '' if brng is None or brng >= 9.0 else f'  {brng:.2f} m'
+            dist = '' if crng is None or crng >= 9.0 else f'  {crng:.2f} m'
+            cam = (f'camera:     {LEVEL_BAR.get(bar, str(bar))}{dist}'
+                   + ('  (stale)' if bar_stale else ''))
+        fg = '#e04040' if bar == 2 and not bar_stale else '#30b050'
+        if urng is None:
+            us = 'ultrasonic: -'
+        else:
+            if urng <= lt['stop_m']:
+                zone, ufg = f'STOP (<= {lt["stop_m"]:.2f})', '#e04040'
+            elif urng < lt['clear_m']:
+                zone, ufg = f'DOWN (< {lt["clear_m"]:.2f})', '#e04040'
+            elif urng < lt['slow_m']:
+                zone, ufg = f'SLOW (< {lt["slow_m"]:.2f})', '#e0a020'
+            else:
+                zone, ufg = 'clear', '#30b050'
+            us = f'ultrasonic: {urng:.2f} m  {zone}' + ('  (stale)' if urng_stale else '')
+            if not urng_stale and ufg != '#30b050':
+                fg = ufg
+        if bar is None and urng is None:
             self.level_text.config(
-                text=f'crossing bar: {state}{dist}' + ('  (stale)' if bar_stale else ''),
-                fg='#777' if bar_stale else '#e04040' if bar == 2 else '#30b050')
+                text='crossing bar: no report - mission 5 armed? detector / ultrasonic up?',
+                fg='#e04040')
+        else:
+            self.level_text.config(text=f'{cam}\n{us}', fg=fg)
 
         if self.with_image:
             if frame is not None and stamp != self.shown:

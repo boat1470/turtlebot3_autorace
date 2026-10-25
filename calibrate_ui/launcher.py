@@ -103,8 +103,11 @@ MISSION_CMD = 'ros2 launch arx_mission full.launch.py sim:=false start:={}'
 SKIP_LEVEL = ' skip_level:=true'
 # Where the launcher's output is kept, a file a day - see Window.save_line.
 RUNS_DIR = os.path.expanduser('~/runs')
-# Mission 5 read by the camera (detect_level) instead of the Pi's HC-SR04.
-LEVEL_CAMERA = ' level_source:=camera'
+# What reads mission 5's bar - full.launch level_source, always passed.
+# camera (detect_level here) is the default since 2026-10-25; ultrasonic is
+# the Pi's HC-SR04; both is the camera's DOWN with the HC-SR04's distances.
+LEVEL_SOURCES = (('ultrasonic', 'ultrasonic (Pi)'), ('camera', 'camera'),
+                 ('both', 'camera DOWN + ultrasonic stop/lift'))
 # detect_lane's white and yellow masks - full.launch leaves them off, so the
 # lane_debug mask tabs and the bags have none without this.
 LANE_MASKS = ' debug_image:=true'
@@ -463,7 +466,7 @@ class Window:
         names = presets()
         self.preset = tk.StringVar(value='full' if 'full' in names else names[0])
         self.skip_level = tk.BooleanVar(value=False)
-        self.level_camera = tk.BooleanVar(value=False)
+        self.level_source = tk.StringVar(value='camera')
         self.lane_masks = tk.BooleanVar(value=False)
         self.mission = Job('run', 'full.launch', self.mission_command(), self.out)
         self.jobs.append(self.mission)
@@ -489,9 +492,12 @@ class Window:
         tk.Checkbutton(box, text='skip mission 5 (level crossing) - straight on to the tunnel',
                        variable=self.skip_level,
                        command=self.pick_preset).grid(row=2, column=0, columnspan=5, sticky='w')
-        tk.Checkbutton(box, text='mission 5 by camera (detect_level) - not the ultrasonic',
-                       variable=self.level_camera,
-                       command=self.pick_preset).grid(row=3, column=0, columnspan=5, sticky='w')
+        level = tk.Frame(box)
+        level.grid(row=3, column=0, columnspan=5, sticky='w')
+        tk.Label(level, text='mission 5 bar by:').pack(side='left')
+        for value, text in LEVEL_SOURCES:
+            tk.Radiobutton(level, text=text, value=value, variable=self.level_source,
+                           command=self.pick_preset).pack(side='left')
         tk.Checkbutton(box, text='lane masks (debug_image) - white and yellow mask images',
                        variable=self.lane_masks,
                        command=self.pick_preset).grid(row=4, column=0, columnspan=5, sticky='w')
@@ -536,8 +542,7 @@ class Window:
         cmd = MISSION_CMD.format(self.preset.get())
         if self.skip_level.get():
             cmd += SKIP_LEVEL
-        if self.level_camera.get():
-            cmd += LEVEL_CAMERA
+        cmd += f' level_source:={self.level_source.get()}'
         if self.lane_masks.get():
             cmd += LANE_MASKS
         return cmd

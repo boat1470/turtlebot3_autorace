@@ -920,6 +920,10 @@ class MissionControl(Node):
         # bar. 0.30 m leaves the bar filling a good part of the frame with
         # room to spare.
         self.declare_parameter('level.stop_m', 0.30)
+        # ARX: ticks in a row inside stop_m before the ultrasonic stops the
+        # creep (ultrasonic / both). One stray low echo stopped run 1024_2321
+        # ~0.20 m early. The camera's stop is unchanged, one tick.
+        self.declare_parameter('level.stop_ticks', 3)
         self.declare_parameter('level.speed', 0.04)
         # Up to the bar on the lane, capped at approach_max_vel, rather than
         # on a held heading at level.speed (false).
@@ -934,9 +938,11 @@ class MissionControl(Node):
         # What decides at the crossing. 'ultrasonic': /detect/level_range
         # alone, against a threshold per stage - slow under slow_m, stop at
         # stop_m, go once it is past clear_m. 'camera': /detect/level_bar
-        # (down/up) as detect_level reports it. full.launch sets it from
-        # level_source.
-        self.declare_parameter('level.source', 'ultrasonic')
+        # (down/up) and /detect/level_range_cam as detect_level reports them.
+        # 'both' (ARX, 2026-10-24): the camera's DOWN starts the creep, then
+        # the ultrasonic stops it at stop_m and lets it go past clear_m.
+        # full.launch sets it from level_source.
+        self.declare_parameter('level.source', 'camera')
         self.declare_parameter('level.slow_m', 0.45)
         # ARX: with level.source camera, its own two distances: start creeping
         # once DOWN is seen at or inside camera.slow_m, stop at camera.stop_m.
@@ -1261,8 +1267,12 @@ class MissionControl(Node):
         # Latest report from detect_level, and how many ticks in a row it has
         # said the same thing.
         self.bar = None
-        self.bar_range = None
+        self.bar_range = None           # the ultrasonic's, /detect/level_range
         self.bar_range_at = None
+        self.cam_range = None           # ARX: the camera's, /detect/level_range_cam
+        self.cam_range_at = None
+        self.us_near_seen = False       # ARX: both - inside clear_m during the creep
+        self.stop_ticks = 0             # ARX: ultrasonic ticks in a row inside stop_m
         self.bar_ticks = 0
         # Ticks in a row the tunnel test has held, and whether the robot has
         # stopped steering by the lane and is driving itself in.
@@ -1333,6 +1343,7 @@ class MissionControl(Node):
         self.create_subscription(Float32, '/detect/front_range', self.on_front, 1)
         self.create_subscription(UInt8, '/detect/level_bar', self.on_bar, 1)
         self.create_subscription(Float32, '/detect/level_range', self.on_bar_range, 1)
+        self.create_subscription(Float32, '/detect/level_range_cam', self.on_cam_range, 1)
         # How much of the frame each line fills, as detect_lane sees it.
         # Both are computed every frame whatever follow_side says, so they
         # stay live while the robot is hugging one of them - which
@@ -1414,9 +1425,14 @@ class MissionControl(Node):
         self.bar = msg.data
 
     def on_bar_range(self, msg):
-        """How far detect_level says the bar is, in metres (ARX)."""
+        """How far the ultrasonic says the bar is, in metres (ARX)."""
         self.bar_range = msg.data
         self.bar_range_at = self.now()
+
+    def on_cam_range(self, msg):
+        """How far the camera detector estimates the bar is, in metres (ARX)."""
+        self.cam_range = msg.data
+        self.cam_range_at = self.now()
 
     def heading_ok(self, prefix=None):
         """Whether the robot is pointing a way this mission's board can be seen from."""
@@ -3328,32 +3344,41 @@ class MissionControl(Node):
             self.bar_ticks = 0
         return self.bar_ticks
 
+    def level_mode(self):
+        """level.source: 'ultrasonic', 'camera' or 'both' (ARX)."""
+        return self.get_parameter('level.source').value
+
     def by_range(self):
         """Whether the crossing is decided from the range alone (ARX)."""
-        return self.get_parameter('level.source').value == 'ultrasonic'
+        return self.level_mode() == 'ultrasonic'
 
-    def fresh_range(self):
-        """The latest bar range, or None when there is none recent (ARX)."""
-        if self.bar_range is None or self.bar_range_at is None:
+    def fresh_range(self, cam=False):
+        """The latest bar range, or None when there is none recent (ARX).
+
+        The ultrasonic's /detect/level_range, or with cam the camera's
+        estimate on /detect/level_range_cam.
+        """
+        rng, at = ((self.cam_range, self.cam_range_at) if cam
+                   else (self.bar_range, self.bar_range_at))
+        if rng is None or at is None:
             return None
-        if self.now() - self.bar_range_at > self.get_parameter(
-                'level.range_max_age_s').value:
+        if self.now() - at > self.get_parameter('level.range_max_age_s').value:
             return None
-        return self.bar_range
+        return rng
 
     def level_stop_m(self):
-        """Where the creep stops: camera.stop_m or stop_m, by level.source (ARX)."""
-        if self.by_range():
-            return self.get_parameter('level.stop_m').value
-        return self.get_parameter('level.camera.stop_m').value
+        """Where the creep stops: camera.stop_m, or stop_m on the ultrasonic (ARX)."""
+        if self.level_mode() == 'camera':
+            return self.get_parameter('level.camera.stop_m').value
+        return self.get_parameter('level.stop_m').value
 
-    def range_run(self, test):
+    def range_run(self, test, cam=False):
         """Ticks in a row a fresh range has passed `test` (ARX).
 
         The range-mode twin of bar_run, on the same counter. A tick with no
         fresh range breaks the run - silence is not evidence either way.
         """
-        rng = self.fresh_range()
+        rng = self.fresh_range(cam)
         if rng is not None and test(rng):
             self.bar_ticks += 1
         else:
@@ -3391,11 +3416,18 @@ class MissionControl(Node):
             self.bar_ticks = 0
         elif (self.range_run(lambda r: r < slow_m) if self.by_range()
               # Camera: DOWN, and near enough - camera.slow_m on its range.
-              else self.range_run(lambda r: self.bar == BAR_DOWN and r <= cam_slow_m)
+              else self.range_run(lambda r: self.bar == BAR_DOWN and r <= cam_slow_m, cam=True)
+              if self.level_mode() == 'camera'
+              # ARX: both - the camera only says DOWN; the ultrasonic does
+              # the distances from here on.
+              else self.bar_run({BAR_DOWN})
               ) >= need:
             self.hold_heading_deg = self.yaw
             self.bar_ticks = 0
-            rng = 'unknown' if self.bar_range is None else f'{self.bar_range:.2f} m'
+            self.us_near_seen = False
+            self.stop_ticks = 0
+            seen = self.bar_range if self.by_range() else self.cam_range
+            rng = 'unknown' if seen is None else f'{seen:.2f} m'
             where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
             self.get_logger().info(
                 f'crossing bar is down, {rng} away, facing {where} - creeping up to '
@@ -3433,7 +3465,8 @@ class MissionControl(Node):
                            linear=self.get_parameter('level.speed').value)
 
         gone = self.dist_from(self.lot_mark)
-        rng = self.fresh_range() if self.by_range() else self.bar_range
+        mode = self.level_mode()
+        rng = self.cam_range if mode == 'camera' else self.fresh_range()
 
         # The bar lifting while the robot is still creeping is the ordinary
         # case in the simulator, where the plugin opens it at 0.30 m. It is
@@ -3442,13 +3475,30 @@ class MissionControl(Node):
         # past clear_m would be true from the start, the creep begins near
         # 0.45 m.
         slow_m = self.get_parameter('level.slow_m').value
-        if (self.range_run(lambda r: r > slow_m) if self.by_range()
-                else self.bar_run({BAR_UP, BAR_NONE})) >= self.get_parameter(
-                'level.clear_ticks').value:
+        clear_m = self.get_parameter('level.clear_m').value
+        if mode == 'both':
+            # ARX: the camera saw DOWN from wherever it could, so the
+            # ultrasonic may still read past clear_m when the creep starts.
+            # Lifted only once it has been inside clear_m and gone back out.
+            if rng is not None and rng <= clear_m:
+                self.us_near_seen = True
+            lifted = self.range_run(lambda r: self.us_near_seen and r > clear_m)
+        elif mode == 'ultrasonic':
+            lifted = self.range_run(lambda r: r > slow_m)
+        else:
+            lifted = self.bar_run({BAR_UP, BAR_NONE})
+        if lifted >= self.get_parameter('level.clear_ticks').value:
             self.finish_level(f'bar lifted while creeping, {gone:.2f} m in')
             return
 
-        if rng is not None and rng <= self.level_stop_m():
+        # ARX: on the ultrasonic, stop_ticks in a row - run 1024_2321 stopped
+        # on one stray 0.08 m with the bar still ~0.30 m off (camera 0.33).
+        near = rng is not None and rng <= self.level_stop_m()
+        self.stop_ticks = self.stop_ticks + 1 if near else 0
+        need_stop = (1 if mode == 'camera'
+                     else self.get_parameter('level.stop_ticks').value)
+        if near and self.stop_ticks >= need_stop:
+            self.stop_ticks = 0
             self.get_logger().info(
                 f'stopping {rng:.2f} m short of the bar, after {gone:.2f} m')
             self.set_avoid(True, angular=0.0, linear=0.0)
@@ -3479,7 +3529,7 @@ class MissionControl(Node):
         self.set_avoid(True, angular=0.0, linear=0.0)
 
         need = self.get_parameter('level.clear_ticks').value
-        if self.by_range():
+        if self.level_mode() in ('ultrasonic', 'both'):
             # Standing at stop_m, the bar post and the road ahead read well
             # past clear_m; the bar itself reads under it. Down/up by the Pi's
             # own threshold is not used - at 0.45 it took the post for the bar.
