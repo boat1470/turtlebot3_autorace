@@ -1016,6 +1016,12 @@ class MissionControl(Node):
         # board confirmed, and after it something within stop_ahead_m ahead
         # on the LiDAR. Something that close before the board does not count.
         self.declare_parameter('tunnel.stop_at_sign', True)
+        # ARX: false - the tunnel board is not looked for; facing within
+        # tunnel.heading for heading_hold_s in a row stands in for it, then
+        # the stop at stop_ahead_m as with the board (2026-10-25: the
+        # practice room has no board, and a run never stopped at the front).
+        self.declare_parameter('tunnel.use_sign', True)
+        self.declare_parameter('tunnel.heading_hold_s', 1.0)
         self.declare_parameter('tunnel.stop_ahead_m', 0.25)
         # Readings in a row - /detect/front_range jumps for a scan now and
         # then (0.437 -> 0.242 -> 0.534 in one run), and one is not a wall.
@@ -3565,6 +3571,7 @@ class MissionControl(Node):
             self.reset_votes()
             self.tunnel_sign_seen = False
             self.tunnel_ticks = 0
+            self.tunnel_head_since = None
             self.go(STAGE_DRIVE_TO_TUNNEL, f'{why} - on to the tunnel')
         else:
             self.go(STAGE_FOLLOW_SIDE, why)
@@ -3635,8 +3642,21 @@ class MissionControl(Node):
                 else:
                     self.tunnel_ticks = 0
                 winner = None
-            else:
+            elif self.get_parameter('tunnel.use_sign').value:
                 winner, votes = self.sign_majority({SIGN_TUNNEL})
+            else:
+                # ARX: tunnel.use_sign false - the heading stands in for the
+                # board, as construction.use_sign / parking.use_sign do.
+                winner, votes = None, 0
+                if facing and self.yaw is not None:
+                    if getattr(self, 'tunnel_head_since', None) is None:
+                        self.tunnel_head_since = now
+                    held_s = now - self.tunnel_head_since
+                    if held_s >= self.get_parameter('tunnel.heading_hold_s').value:
+                        winner = SIGN_TUNNEL
+                        votes = f'no sign used, facing for {held_s:.1f} s,'
+                else:
+                    self.tunnel_head_since = None
 
             if winner == SIGN_TUNNEL and stop_at_front:
                 self.tunnel_sign_seen = True

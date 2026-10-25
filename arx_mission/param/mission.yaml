@@ -1141,6 +1141,11 @@
       # before the board does not count. false carries on the old way: hold
       # the heading at the board and creep in until the walls.
       stop_at_sign: true
+      # true: the tunnel board is looked for. false: facing within
+      # tunnel.heading (-90 +/- 30) for heading_hold_s stands in for it, then
+      # the stop at stop_ahead_m - for the practice room, which has no board.
+      use_sign: true
+      heading_hold_s: 1.0
       stop_ahead_m: 0.25
       stop_ahead_ticks: 2
       # Speed ceiling from the board to the stop, so a 0.15 m stop is not
@@ -1151,7 +1156,9 @@
       # param/nav2.yaml), then stop. Needs full.launch nav:=true - the
       # default on the robot. false stops at the front as before.
       nav:
-        enabled: true
+        # false on 2026-10-25: stop at the tunnel front (LiDAR <= stop_ahead_m
+        # after the sign) instead of handing over to Nav2.
+        enabled: false
         # Where the front is on the tunnel map, and which way the robot faces
         # there - map frame. Read off RViz 2026-10-17.
         start_x: 0.0
