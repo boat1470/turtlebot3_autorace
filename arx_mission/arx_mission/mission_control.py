@@ -609,6 +609,10 @@ class MissionControl(Node):
         # odom it stops on and the stop it is sent both cross Wi-Fi - and
         # then drove `out` diagonally, towards the board ahead.
         self.declare_parameter('construction.avoid.edge.slow_within_deg', 20.0)
+        # ARX: end the on-the-spot turn this many degrees short of its
+        # heading (absolute mode) - the robot carries on round after the
+        # stop. 0 ends it on the heading.
+        self.declare_parameter('construction.avoid.edge.in_place_stop_early_deg', 0.0)
         # There is no tolerance parameter for the end of a swing back. It
         # finishes when the heading crosses the one it started from, which
         # is a sign change and cannot be stepped over.
@@ -2456,7 +2460,16 @@ class MissionControl(Node):
         way = self.edge_dir if self.edge_phase < 3 else -self.edge_dir
 
         if self.edge_phase == 0:
-            if self.edge_on_spot():
+            early = (g('construction.avoid.edge.in_place_stop_early_deg').value
+                     if self.edge_on_spot() else 0.0)
+            reached = (self.edge_reached(self.edge_headings()[0], self.edge_dir, early)
+                       if absolute else abs(turned) >= swing)
+            if reached and self.edge_on_spot():
+                # ARX: checked before the command, so the tick that gets
+                # there stops instead of sending one more turn - run
+                # 1025_1452 sent +0.50 and +0.76 rad/s past 180.
+                self.set_avoid(True, angular=0.0, linear=0.0)
+            elif self.edge_on_spot():
                 w = spot_rate
                 slow = g('construction.avoid.edge.slow_within_deg').value
                 if absolute and slow > 0:
@@ -2465,8 +2478,7 @@ class MissionControl(Node):
                 self.set_avoid(True, angular=self.edge_dir * w, linear=0.0)
             else:
                 self.set_avoid(True, angular=self.edge_dir * rate, linear=speed)
-            if (self.edge_reached(self.edge_headings()[0], self.edge_dir) if absolute
-                    else abs(turned) >= swing):
+            if reached:
                 self.edge_phase = 10 if self.three_beat() else 1
                 self.edge_mark = self.pos
                 self.get_logger().info(
@@ -2624,13 +2636,14 @@ class MissionControl(Node):
         mirror = corridor - self.heading_off(out, corridor)
         return out, corridor, mirror
 
-    def edge_reached(self, target, way):
+    def edge_reached(self, target, way, early=0.0):
         """Whether turning `way` has brought yaw to or past target (ARX).
 
         The same sign-change test as edge_crossed, so a coarse tick cannot
-        step over it, but against a fixed odom heading.
+        step over it, but against a fixed odom heading. early counts it as
+        reached that many degrees short.
         """
-        return self.yaw is not None and self.heading_off(target, self.yaw) * way <= 0.0
+        return self.yaw is not None and self.heading_off(target, self.yaw) * way <= early
 
     def edge_crossed(self, turned, base, way):
         """Whether a swing has come back past the heading it left (ARX).

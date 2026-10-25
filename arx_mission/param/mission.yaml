@@ -541,6 +541,12 @@
           # past 180: the odom it stops on and the stop itself both cross
           # Wi-Fi. 0 turns the easing off. Absolute mode only.
           slow_within_deg: 20.0
+          # End the on-the-spot turn this many degrees short of
+          # swing_heading_deg (2026-10-25). At in_place_rate 1.5 the robot came
+          # to rest at -170.2, 10 past 180 (1025_1438); at 2.0 with 15 here,
+          # -176.2 (1025_1503). The tick that gets there now stops rather than
+          # sending one more turn. Absolute mode only.
+          in_place_stop_early_deg: 8.0
 
           # Measured over the whole seven-phase move, not one phase: it is
           # timed from entering the stage. A real run came to
