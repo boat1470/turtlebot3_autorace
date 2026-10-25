@@ -64,8 +64,12 @@ FOLLOW_WHITE = 2
 # the white one; with only one in view it is the yellow line plus half a lane,
 # as FOLLOW_YELLOW.
 FOLLOW_YELLOW_PAIR = 3
+# ARX: FOLLOW_YELLOW with the centre lane.yellow_wide_extra_px further from
+# the line - leaving the parking lot round 18B, where yellow + half a lane
+# put the robot's inside wheel over the yellow line (run 1025_1058).
+FOLLOW_YELLOW_WIDE = 4
 SIDE_NAMES = {FOLLOW_AUTO: 'auto', FOLLOW_YELLOW: 'yellow', FOLLOW_WHITE: 'white',
-              FOLLOW_YELLOW_PAIR: 'yellow pair'}
+              FOLLOW_YELLOW_PAIR: 'yellow pair', FOLLOW_YELLOW_WIDE: 'yellow, wide'}
 
 
 class DetectLane(Node):
@@ -127,6 +131,9 @@ class DetectLane(Node):
                 # course on 2026-10-04; the 280 it replaces was half of the
                 # simulator's.
                 ('lane.half_lane_px', 297),
+                # ARX: added to half_lane_px while steering by the yellow line
+                # in FOLLOW_YELLOW_WIDE (leaving the parking lot round 18B).
+                ('lane.yellow_wide_extra_px', 0),
                 # ARX: the row of /camera/image_projected whose centre is
                 # published - how far ahead the robot aims. Was a literal 350.
                 # Higher is nearer the robot: cuts corners less, reacts later.
@@ -270,6 +277,7 @@ class DetectLane(Node):
         # minus half a lane width - so following the yellow line is exactly
         # what this node does anyway when the white one drops out.
         self.follow_side = FOLLOW_AUTO
+        self.yellow_wide = False
         self.create_subscription(UInt8, '/arx/follow_side', self.cbFollowSide, 1)
 
         self.cvBridge = CvBridge()
@@ -310,7 +318,15 @@ class DetectLane(Node):
 
     def cbFollowSide(self, msg):
         """Latch which line to steer by (ARX)."""
-        if msg.data == self.follow_side:
+        # ARX: FOLLOW_YELLOW_WIDE is FOLLOW_YELLOW everywhere below, with the
+        # centre further out; the yellow fit carries over between the two.
+        wide = msg.data == FOLLOW_YELLOW_WIDE
+        side = FOLLOW_YELLOW if wide else msg.data
+        if side == self.follow_side and wide == self.yellow_wide:
+            return
+        self.yellow_wide = wide
+        if side == self.follow_side:
+            self.get_logger().info(f'steering by the {SIDE_NAMES[msg.data]} line')
             return
         if self.follow_side == FOLLOW_YELLOW_PAIR:
             self.right_yellow_fit = self.right_yellow_fitx = None
@@ -318,9 +334,9 @@ class DetectLane(Node):
         # ARX: into FOLLOW_YELLOW or the yellow pair, start the left yellow
         # afresh from the left half, rather than carry on a fit tracked while
         # the robot was turning - which may by now be on the other wall.
-        if msg.data in (FOLLOW_YELLOW, FOLLOW_YELLOW_PAIR):
+        if side in (FOLLOW_YELLOW, FOLLOW_YELLOW_PAIR):
             self.forget_left_yellow()
-        self.follow_side = msg.data
+        self.follow_side = side
         self.get_logger().info(
             'steering by the mean of both lines' if msg.data == FOLLOW_AUTO
             else f'steering by the {SIDE_NAMES.get(msg.data, msg.data)} line')
@@ -866,7 +882,9 @@ class DetectLane(Node):
             lane_state.data = 2
 
         elif self.follow_side in (FOLLOW_YELLOW, FOLLOW_YELLOW_PAIR) and has_left:
-            centerx = np.add(self.left_fitx, half)
+            extra = (self.get_parameter('lane.yellow_wide_extra_px').value
+                     if self.yellow_wide and self.follow_side == FOLLOW_YELLOW else 0)
+            centerx = np.add(self.left_fitx, half + extra)
             pts_center = np.array([np.transpose(np.vstack([centerx, ploty]))])
             lane_state.data = 1
 
@@ -975,7 +993,9 @@ class DetectLane(Node):
         if centerx is not None:
             line_colour, text_colour, dashed, text = {
                 2: ((0, 255, 255), (0, 255, 255), False, '2  BOTH: mean of the two fits'),
-                1: (PINK, PINK, True, f'1  YELLOW + {half}'),
+                1: (PINK, PINK, True, f'1  YELLOW + {half}'
+                    + (f' + {self.get_parameter("lane.yellow_wide_extra_px").value}'
+                       if self.yellow_wide and self.follow_side == FOLLOW_YELLOW else '')),
                 3: (BLUE, (255, 160, 80), True, f'3  WHITE - {half}'),
             }.get(lane_state.data,
                   ((200, 200, 200), (200, 200, 200), False, str(lane_state.data)))

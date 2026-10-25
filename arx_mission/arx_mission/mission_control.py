@@ -93,6 +93,9 @@ FOLLOW_WHITE = 2
 # ARX: detect_lane's yellow pair - both walls yellow, as on the way into the
 # parking lot. Must match detect_lane.py.
 FOLLOW_YELLOW_PAIR = 3
+# ARX: FOLLOW_YELLOW with the centre lane.yellow_wide_extra_px further from the
+# line (detect_lane). Must match detect_lane.py.
+FOLLOW_YELLOW_WIDE = 4
 
 SIDE_FOR_SIGN = {SIGN_LEFT: FOLLOW_YELLOW, SIGN_RIGHT: FOLLOW_WHITE}
 SIDE_NAMES = {FOLLOW_AUTO: 'auto', FOLLOW_YELLOW: 'yellow', FOLLOW_WHITE: 'white'}
@@ -3303,8 +3306,10 @@ class MissionControl(Node):
             # Lane following again, but named: the yellow line, because it is
             # the one that leads out of the pocket, and not the mean of both,
             # because there is no white line in here to take a mean with.
+            # ARX: the wide yellow - the centre further from the line round
+            # 18B, which yellow + half a lane cut over (run 1025_1058).
             self.set_avoid(False)
-            self.set_follow_side(FOLLOW_YELLOW)
+            self.set_follow_side(FOLLOW_YELLOW_WIDE)
             want = self.get_parameter('bay.park.leave_heading_deg').value
             tol = self.get_parameter('bay.park.leave_tolerance_deg').value
             if self.yaw is not None:

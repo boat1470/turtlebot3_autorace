@@ -90,6 +90,12 @@
       # gains smooths that away, which is why this comes before kp and kd.
       half_lane_px: 208
 
+      # Added to half_lane_px while leaving the parking lot (park phase 5,
+      # FOLLOW_YELLOW_WIDE), and nowhere else. 20 px is ~13 mm at 1.49 px/mm
+      # Round 18B yellow + 208 put the robot's inside wheel over the yellow
+      # line (run 1025_1058, 2026-10-25); 40 ran too wide. Raise it if it still does.
+      yellow_wide_extra_px: 20
+
       # The row of the 600-row projected image whose centre goes to
       # control_lane - how far ahead the robot aims. 350 is the original's
       # literal. Drawn on /detect/image_lane as a grey line with a white dot.
