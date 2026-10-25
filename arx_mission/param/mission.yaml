@@ -316,6 +316,9 @@
         # 0.22 on 2026-10-14 (was 0.25): run 1014_2304 sat ~7 cm outside the
         # lane centre round 7A. 0.14 m/s keeps the outer wheel at 0.19.
         radius_m: 0.22
+        # 0.14. 0.15 tried 2026-10-25 (1025_1058, 1025_1327): no faster - the
+        # arc ends where both lines come back, not after a time - and the curve
+        # before construction overran to +34 deg.
         speed: 0.14
         back_ticks: 2
         # both: lane_state 2. yellow: 1 or 2 - yellow in view, white or not.
@@ -566,6 +569,8 @@
           # outer wheel stays inside wheel_max (0.21, see control.wheel_max).
           three_beat:
             enabled: true
+            # 0.15. 0.16 tried 2026-10-25 (1025_1058, 1025_1327): 9.0-9.2 s round
+            # the boards either way.
             speed: 0.15
             arc1_radius_m: 0.28
             arc1_end_deg: 30.0
