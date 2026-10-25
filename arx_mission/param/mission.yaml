@@ -333,6 +333,25 @@
         5b_window_s: 2.0
         5b_end_heading_deg: 90.0
 
+      # The left branch's mirror (2026-10-25): there yellow is the inner
+      # line. Gone for yellow_lost_ticks (lane_state 0 or 3) and the robot
+      # arcs left until both lines are back. Run 1025_1337, 4B: yellow left
+      # the view at +104 deg, detect_lane kept a fit beyond the image's left
+      # edge and published -70 for 0.55 s - the robot stopped and jerked.
+      # In that run 0/3 showed only there between the junction and the sign.
+      yellow_lost_ticks: 1
+      yellow_lost_arc:
+        enabled: true
+        side: left
+        # R 0.25, the course's own radius; outer wheel 0.14 * 1.32 = 0.18.
+        radius_m: 0.25
+        speed: 0.14
+        back_ticks: 2
+        until: both
+        min_s: 0.3
+        # 2.0 s is 64 deg - 4B ran out near +155 in 1337, from +104.
+        timeout_s: 2.0
+
       # Measured from the moment the junction is behind us, and the board is
       # most of the way round the course from there.
       give_up_s: 120.0

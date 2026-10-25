@@ -483,6 +483,21 @@ class MissionControl(Node):
         # 0.09 s in 5B, then white only, and circled until lifted.
         self.declare_parameter('construction.white_lost_arc.5b_window_s', 2.0)
         self.declare_parameter('construction.white_lost_arc.5b_end_heading_deg', 90.0)
+        # ARX: the left branch's mirror. There the inner line is yellow, and
+        # once it is gone for yellow_lost_ticks (lane_state 0 or 3) the robot
+        # arcs left the same way until both lines are back. Run 1025_1337,
+        # 4B: yellow left the view, detect_lane kept a fit beyond the image's
+        # left edge, published -70 for 0.55 s and the robot stopped and
+        # jerked round.
+        self.declare_parameter('construction.yellow_lost_ticks', 1)
+        self.declare_parameter('construction.yellow_lost_arc.enabled', False)
+        self.declare_parameter('construction.yellow_lost_arc.side', 'left')
+        self.declare_parameter('construction.yellow_lost_arc.radius_m', 0.25)
+        self.declare_parameter('construction.yellow_lost_arc.speed', 0.14)
+        self.declare_parameter('construction.yellow_lost_arc.back_ticks', 2)
+        self.declare_parameter('construction.yellow_lost_arc.until', 'both')
+        self.declare_parameter('construction.yellow_lost_arc.min_s', 0.3)
+        self.declare_parameter('construction.yellow_lost_arc.timeout_s', 3.0)
         self.declare_parameter('construction.give_up_s', 120.0)
         # The board is turned -90 degrees in the world file like the arrow
         # is, so its broad faces are normal to the world x axis and it can
@@ -1257,6 +1272,8 @@ class MissionControl(Node):
         self.wl_arc_since = None        # ARX: white_lost_arc running since
         self.wl_arc_back = 0
         self.wl_arc_5b = False          # ARX: this arc is the one in 5B
+        self.wl_arc_line = 'white'      # ARX: which lost line the arc is for
+        self.yellow_lost_ticks = 0      # ARX: for construction.yellow_lost_arc
         # ARX: ticks in a row with both yellow walls, and whether that has
         # released the slow-down for the rest of the way in.
         self.lot_pair_ticks = 0
@@ -2145,8 +2162,8 @@ class MissionControl(Node):
         self.set_avoid(False)
 
     def tick_white_lost_arc(self, now):
-        """A fixed-radius arc while the white line is out of view (ARX)."""
-        p = 'construction.white_lost_arc.'
+        """A fixed-radius arc while the inner line is out of view (ARX)."""
+        p = f'construction.{self.wl_arc_line}_lost_arc.'
         v = self.get_parameter(p + 'speed').value
         w = v / max(self.get_parameter(p + 'radius_m').value, 0.05)
         if self.get_parameter(p + 'side').value != 'left':
@@ -2159,7 +2176,9 @@ class MissionControl(Node):
         found = (1, 2) if until == 'yellow' else (2,)   # yellow_pair: 2 in pair mode
         self.wl_arc_back = self.wl_arc_back + 1 if self.lane_state in found else 0
         need = self.get_parameter(p + 'back_ticks').value
-        end = self.get_parameter(p + '5b_end_heading_deg').value
+        # 5B is the white arc's only - the yellow one never sets wl_arc_5b.
+        end = (self.get_parameter(p + '5b_end_heading_deg').value
+               if self.wl_arc_5b else None)
         why = None
         if self.wl_arc_back >= need and elapsed >= self.get_parameter(p + 'min_s').value:
             why = f'{until} for {need} ticks'
@@ -2174,7 +2193,7 @@ class MissionControl(Node):
             self.set_avoid(False)
             where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
             self.get_logger().info(
-                f'white-lost arc done after {elapsed:.1f} s ({why}), facing {where} '
+                f'{self.wl_arc_line}-lost arc done after {elapsed:.1f} s ({why}), facing {where} '
                 f'- following the lane again')
 
     def tick_drive_to_construction(self, now):
@@ -2191,8 +2210,8 @@ class MissionControl(Node):
         # lines happens when the sign is read, not on the way to it.
         # ARX: white_lost_arc's 'yellow_pair' has detect_lane look for the
         # yellow pair for as long as the arc runs, so lane_state 2 means it.
-        if (self.wl_arc_since is not None
-                and self.get_parameter('construction.white_lost_arc.until').value == 'yellow_pair'):
+        if (self.wl_arc_since is not None and self.get_parameter(
+                f'construction.{self.wl_arc_line}_lost_arc.until').value == 'yellow_pair'):
             self.set_follow_side(FOLLOW_YELLOW_PAIR)
         else:
             self.set_follow_side(self.chosen_side())
@@ -2215,6 +2234,7 @@ class MissionControl(Node):
                 where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
                 self.white_lost_ticks = 0
                 if arc_on:
+                    self.wl_arc_line = 'white'
                     self.wl_arc_since, self.wl_arc_back = now, 0
                     self.wl_arc_5b = (now - self.stage_since <= self.get_parameter(
                         'construction.white_lost_arc.5b_window_s').value)
@@ -2228,6 +2248,25 @@ class MissionControl(Node):
                     return
                 self.stop(f'white line gone for {need} ticks (lane_state '
                           f'{self.lane_state}, facing {where}) - stopping here, as asked')
+                return
+
+        # ARX: see construction.yellow_lost_arc. Left branch only, where
+        # yellow is the inner line.
+        if (self.get_parameter('construction.yellow_lost_arc.enabled').value
+                and self.arc_side == 'left'):
+            self.yellow_lost_ticks = (self.yellow_lost_ticks + 1
+                                      if self.lane_state in (0, 3) else 0)
+            need = self.get_parameter('construction.yellow_lost_ticks').value
+            if self.yellow_lost_ticks >= need:
+                where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
+                self.yellow_lost_ticks = 0
+                self.wl_arc_line, self.wl_arc_5b = 'yellow', False
+                self.wl_arc_since, self.wl_arc_back = now, 0
+                self.get_logger().info(
+                    f'yellow line gone for {need} ticks (lane_state {self.lane_state}, '
+                    f'facing {where}) - arcing until '
+                    f'{self.get_parameter("construction.yellow_lost_arc.until").value} is in view')
+                self.tick_white_lost_arc(now)
                 return
 
         # Lane following has the wheel - the white_lost_arc above returns

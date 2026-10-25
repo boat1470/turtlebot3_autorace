@@ -950,6 +950,14 @@ class DetectLane(Node):
 
             pass
 
+        # ARX: a centre outside the image is no centre. Run 1025_1337, 4B:
+        # yellow left the view, the left fit stayed on a curve beyond the
+        # image's left edge, and "yellow + half" put the centre at -70 for
+        # 0.55 s - control_lane stopped the robot and swung it left. Reported
+        # as lane_state 0, so mission_control's yellow_lost_arc sees it too.
+        if centerx is not None and not 0 <= centerx.item(row) < cv_image.shape[1]:
+            centerx = None
+
         # ARX: the guard. Whatever route was taken above, if it did not leave
         # a centre line then this frame has no lane to report - say so rather
         # than reading a name that was never bound.
