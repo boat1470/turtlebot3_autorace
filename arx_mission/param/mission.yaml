@@ -676,6 +676,11 @@
         # 0.14 with R 0.20: outer wheel 0.14 x 1.4 = 0.196, under 0.21
         speed: 0.14
         end_heading_deg: -90.0
+        # End the arc this many degrees short of end_heading_deg (2026-10-25);
+        # drive_to_lot's hold still aims at end_heading_deg. Run 1025_1407
+        # ended at -88.6 and the robot came round on to -82 before the pair
+        # pulled it back to -99.
+        stop_early_deg: 5.0
         timeout_s: 6.0
         # then: follow the yellow pair, and lock end_heading_deg once it is
         # lost for pair_lost_ticks, or if it is not in view pair_wait_s after

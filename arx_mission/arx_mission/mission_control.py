@@ -698,6 +698,9 @@ class MissionControl(Node):
         self.declare_parameter('parking.left_arc.radius_m', 0.25)
         self.declare_parameter('parking.left_arc.speed', 0.12)
         self.declare_parameter('parking.left_arc.end_heading_deg', -90.0)
+        # ARX: end the arc this many degrees short of end_heading_deg; the
+        # hold that follows still aims at end_heading_deg itself.
+        self.declare_parameter('parking.left_arc.stop_early_deg', 0.0)
         self.declare_parameter('parking.left_arc.timeout_s', 6.0)
         # After the arc: follow the yellow pair down the way in, and lock
         # end_heading_deg once the pair is lost for pair_lost_ticks - or if it
@@ -2844,7 +2847,8 @@ class MissionControl(Node):
         w = v / max(g(p + 'radius_m').value, 0.05)
         target = g(p + 'end_heading_deg').value
         # Half a tick of turning early, as three_beat does.
-        lead = math.degrees(w) / max(g('rate_hz').value, 0.1) * 0.5
+        lead = (math.degrees(w) / max(g('rate_hz').value, 0.1) * 0.5
+                + g(p + 'stop_early_deg').value)
         done = self.yaw is not None and self.heading_off(target, self.yaw) <= lead
         if done or took >= g(p + 'timeout_s').value:
             # ARX: keep the wheel, holding the arc's heading at speed, rather
