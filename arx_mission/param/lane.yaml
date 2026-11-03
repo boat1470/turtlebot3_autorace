@@ -42,7 +42,15 @@
           # the line's 19-46 (median 23). 40 left 0 glare pixels at one spot
           # and ~700 at the other, where the line kept 2667 of 2960. If glare
           # still gets through, 35 - most of the line is below it.
-          saturation_h: 40
+          #
+          # 50 on 2026-11-01. In the afternoon light the line's bright pixels
+          # read S 21-41 (median 32), 42-47 in its core at lookahead_row, so
+          # 40 was cutting into it: the bottom rows lost ~25% of their pixels
+          # and got them back frame to frame, the white fit's lower end swung,
+          # and the centre at row 580 jittered 2-4 px (runs 1509, 1523). On
+          # live frames 45 still flickered +-4%, 50 +-1% and 54 or 60 no
+          # better. Kept at 50, not higher, for the glare above (S from 50).
+          saturation_h: 50
           # Mat up to 63, glare 92-179, line from 111-121. Was 100; 125 drops
           # most of the glare that saturation_h lets through.
           lightness_l: 125
@@ -88,7 +96,27 @@
       # like that is a derivative of 174 px/s at 10 Hz - the D term kicked the
       # steering by 0.26 rad/s for a robot that had not moved. No pair of
       # gains smooths that away, which is why this comes before kp and kd.
-      half_lane_px: 208
+      #
+      # 218 on 2026-10-31, after the 84 mm wheels lifted the camera and the
+      # extrinsic calibration was redone (projection.yaml top_x 89 / top_y 13
+      # / bottom_x 139 / bottom_y 91): calibrate_ui/lane_width.py on
+      # /camera/image_projected, robot still in the middle of a straight,
+      # 435 px at row 580 (432 at row 300, so the lines are parallel),
+      # centre 503. Measured with image_projection restarted on the saved
+      # file; a reading of 367 px taken while the values were still being
+      # dragged in rqt did not survive the restart. The lane is ~4% wider in
+      # pixels than the 417 above, so kp acts ~4% harder.
+      #
+      # 211 on 2026-11-01: detect_lane's own fits, on /detect/lane_gap while
+      # driving the start straight (run 1101_1008), put the lines 422 px
+      # apart (416-431 for 90% of frames) - the still robot above read them
+      # off thresholded pixels, this is what the centre is actually built from.
+      #
+      # Back to 218 on 2026-11-01. 211 fits the straights, but the lines only
+      # change over in curves, where the gap has opened to ~500 px first: the
+      # centre jumped +41..+44 px dropping to the white line alone in 1A with
+      # 211 (runs 1019, 1033, 1043) against +31 with 218 (0148).
+      half_lane_px: 198 #218
 
       # Added to half_lane_px while leaving the parking lot (park phase 5,
       # FOLLOW_YELLOW_WIDE), and nowhere else. 20 px is ~13 mm at 1.49 px/mm
@@ -110,7 +138,25 @@
       # 480 on 2026-10-11: 4B, which 350 cut into the yellow line, looks
       # right at 480.
       # Not yet checked on the U-turns (19A, 13A) or on the straights.
+      #
+      # 540 tried on 2026-11-01 for the 84 mm wheels (run 1101_0135): 1A
+      # came round smoothly, but the steering on the straight before it
+      # worked twice as hard. Back to 580. What 1A needs is detect_lane not
+      # averaging in the yellow line as it leaves the frame - it goes out
+      # through the near left corner, so its pixels are still at this row.
       lookahead_row: 580
+      # With both lines fitted, their gap at lookahead_row may be off
+      # 2 x half_lane_px by this fraction before one is set aside for the
+      # other (detect_lane.py, make_lane, has the story). 0.25 of 436 px is
+      # +-109 px, a first guess on 2026-11-01: a straight measures ~435.
+      # /detect/lane_gap carries the gap each frame to set it by. 0 is off.
+      #
+      # Off on 2026-11-01. In every run of the day the gap stayed inside
+      # 327-545 px from the start to the junction sign, so it never acted in
+      # 1A, the curve it was for. It did act entering 7A (gap 554-596): in
+      # 1101_1619_2 it set yellow aside for a bent white fit and the steering
+      # swung -1.05/+0.94/-1.80 rad/s before the white-lost arc.
+      pair_width_tol: 0.0
       # A second centre, read at this row and published on
       # /detect/lane_ahead, for control_lane to brake on (its
       # speed_from_ahead). 300 is ~0.19 m ahead of row 580 at 1.49 px/mm.

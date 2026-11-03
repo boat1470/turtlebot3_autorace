@@ -186,7 +186,7 @@ BAR_NAMES = {BAR_NONE: 'nothing', BAR_UP: 'up', BAR_DOWN: 'down'}
 SIDE_CLEAR = 0
 SIDE_LEFT = 1
 SIDE_RIGHT = 2
-SIDE_NAMES = {SIDE_LEFT: 'left', SIDE_RIGHT: 'right'}
+OBSTACLE_SIDE_NAMES = {SIDE_LEFT: 'left', SIDE_RIGHT: 'right'}
 
 BLOCKED_NONE = 0
 BLOCKED_AHEAD = 1
@@ -217,6 +217,24 @@ class MissionControl(Node):
         # costs nothing there; the parameter exists in case practice day says
         # otherwise.
         self.declare_parameter('light.require_transition', True)
+
+        # ARX: hold the start until detect_lane keeps up. Started with the
+        # rest of full.launch it runs at 3-17 frames a second for its first
+        # three or four seconds - Nav2 is still coming up beside it - and the
+        # light check off, the robot set off into that: the start straight
+        # weaved and once swerved 19 deg off before 1A (run 1101_1045). Wait
+        # for min_hz of /detect/lane_state, counted over the last hold_s,
+        # before leaving wait_green whichever way it leaves; past give_up_s
+        # go anyway. min_hz 0 turns it off.
+        #
+        # And no message gap over max_gap_ms in that window: an average hides
+        # one long gap, and six runs on 2026-11-01 that started at 25-30 Hz
+        # still lost the lane for 120-290 ms in their first three seconds,
+        # each followed by a lurch in the steering. 0 drops the gap check.
+        self.declare_parameter('start.min_lane_hz', 25.0)
+        self.declare_parameter('start.lane_hz_hold_s', 3.0)
+        self.declare_parameter('start.max_lane_gap_ms', 100.0)
+        self.declare_parameter('start.give_up_s', 30.0)
 
         self.declare_parameter('intersection.enabled', True)
         # A majority of the last `window` reports, not a run of identical ones.
@@ -1099,9 +1117,19 @@ class MissionControl(Node):
         # drifted to (1.68, 1.27), so Nav2 planned from there and failed.
         self.declare_parameter('tunnel.nav.localise_s', 3.0)
         self.declare_parameter('tunnel.nav.localise_tol_m', 0.25)
-        # Nav2 not answering in this long: it is not running. Stop.
+        # Nav2 not answering in this long: say so in the log. It is waited
+        # for all the same - its bringup can take ~10 s, and a run that stops
+        # here scores nothing more anyway (2026-11-03, 1103_0232).
         self.declare_parameter('tunnel.nav.server_wait_s', 5.0)
-        self.declare_parameter('tunnel.nav.give_up_s', 60.0)
+        # The whole stage; 0 never stops. The obstacles inside are re-laid on
+        # the day (ROBOTIS, 2026-11-03), so a goal that fails is tried again
+        # rather than ending the run: back off backup_m, clear the costmaps,
+        # send it again. attempt_s ends a goal that has gone on that long
+        # without arriving - stuck against something - and retries it.
+        self.declare_parameter('tunnel.nav.give_up_s', 0.0)
+        self.declare_parameter('tunnel.nav.attempt_s', 40.0)
+        self.declare_parameter('tunnel.nav.backup_m', 0.05)
+        self.declare_parameter('tunnel.nav.backup_speed', 0.05)
         # At the exit: follow the lane on from there (true) or stop. A failed
         # or timed-out Nav2 run stops either way - the robot is somewhere in
         # the tunnel, not on a lane.
@@ -1196,6 +1224,12 @@ class MissionControl(Node):
         self.turn_last_yaw = None
         self.turn_accum = 0.0
         self.lane_state = None
+        self.lane_stamps = deque(maxlen=200)   # ARX: start.min_lane_hz
+        # ARX: when lane_state last read 0 or 1. detect_lane sends ~30 a
+        # second and tick reads only the latest; at 7A the white line can be
+        # gone for a single frame before yellow goes too, and tick missed it.
+        self.white_lost_at = None
+        self.lane_wait_said = None
         self.yellow_ok = None
         self.white_ok = None
         # Whether the last report was counted, so the log can say when that
@@ -1360,6 +1394,8 @@ class MissionControl(Node):
                 '/local_costmap/clear_entirely_local_costmap')]
         self.nav_want = False
         self.nav_phase = None
+        self.nav_tries = 0
+        self.nav_backup_at = None
         self.nav_goal = None
         self.nav_result = None
         self.nav_pose_at = None
@@ -1577,6 +1613,46 @@ class MissionControl(Node):
     def on_lane_state(self, msg):
         """Remember what detect_lane is steering by, for the logs."""
         self.lane_state = msg.data
+        self.lane_stamps.append(self.now())
+        if msg.data in (0, 1):
+            self.white_lost_at = self.lane_stamps[-1]
+
+    def lane_ready(self, now):
+        """Whether detect_lane has kept up start.min_lane_hz, with no gap over
+        start.max_lane_gap_ms, for start.lane_hz_hold_s (ARX).
+
+        Logs where it stands every two seconds while it has not, and goes
+        anyway once wait_green has lasted start.give_up_s.
+        """
+        need = self.get_parameter('start.min_lane_hz').value
+        if need <= 0:
+            return True
+        hold = self.get_parameter('start.lane_hz_hold_s').value
+        max_gap = self.get_parameter('start.max_lane_gap_ms').value
+        recent = [t for t in self.lane_stamps if t >= now - hold]
+        hz = len(recent) / hold
+        # The window's edges count as stamps, so a stream that stopped (or has
+        # not started) shows as one long gap rather than none.
+        edges = [now - hold] + recent + [now]
+        gap = max(b - a for a, b in zip(edges, edges[1:])) * 1000
+        waited = now - self.stage_since
+        if hz >= need and (max_gap <= 0 or gap <= max_gap) and waited >= hold:
+            if self.lane_wait_said is not None:
+                self.get_logger().info(
+                    f'detect_lane at {hz:.0f} Hz, longest gap {gap:.0f} ms - starting')
+                self.lane_wait_said = None
+            return True
+        if waited > self.get_parameter('start.give_up_s').value:
+            self.get_logger().warn(
+                f'detect_lane only at {hz:.0f} Hz, longest gap {gap:.0f} ms '
+                f'after {waited:.0f} s - starting anyway')
+            return True
+        if self.lane_wait_said is None or now - self.lane_wait_said >= 2.0:
+            self.get_logger().info(
+                f'waiting for detect_lane: {hz:.0f} Hz, longest gap {gap:.0f} ms - '
+                f'want {need:.0f} Hz and no gap over {max_gap:.0f} ms for {hold:.0f} s')
+            self.lane_wait_said = now
+        return False
 
     def on_yellow_ok(self, msg):
         """How much of the frame the yellow line fills, 0 to 100."""
@@ -1669,11 +1745,11 @@ class MissionControl(Node):
             self.tick_wait_green(now)
         elif self.stage == STAGE_DRIVE_TO_SIGN:
             self.tick_drive_to_sign(now)
-        elif self.stage == STAGE_TURN:
+        elif self.stage == STAGE_TURN: # ไม่ใช้แล้ว
             self.tick_turn(now)
         elif self.stage == STAGE_ARC:
             self.tick_arc(now)
-        elif self.stage == STAGE_LEFT_SCRIPT:
+        elif self.stage == STAGE_LEFT_SCRIPT: # ไม่ใช้แล้ว
             self.tick_left_script(now)
         elif self.stage == STAGE_FOLLOW_SIDE:
             self.tick_follow_side()
@@ -1709,6 +1785,9 @@ class MissionControl(Node):
         self.set_driving(False)
         self.set_follow_side(FOLLOW_AUTO) #v;ldk
         self.set_avoid(False)
+        # ARX: start.min_lane_hz - before either way out of this stage.
+        if not self.lane_ready(now):
+            return
         if not self.get_parameter('light.enabled').value:
             self.start('traffic light check disabled')
             return
@@ -1753,7 +1832,7 @@ class MissionControl(Node):
 
         self.set_armed(MISSION_INTERSECTION)
 
-        winner, votes = self.sign_majority()
+        winner, votes = self.sign_majority({SIGN_LEFT, SIGN_RIGHT})
         how = None
         if self.get_parameter('intersection.left_only.enabled').value:
             # ARX: see intersection.left_only.
@@ -2234,8 +2313,11 @@ class MissionControl(Node):
         arc_on = (self.get_parameter('construction.white_lost_arc.enabled').value
                   and self.arc_side == 'right')
         if arc_on or self.get_parameter('construction.stop_when_white_lost').value:
-            self.white_lost_ticks = (self.white_lost_ticks + 1
-                                     if self.lane_state in (0, 1) else 0)
+            # Any 0/1 frame since the last tick counts, not only the latest.
+            lost = (self.lane_state in (0, 1) or (
+                self.white_lost_at is not None and self.white_lost_at >= self.stage_since
+                and now - self.white_lost_at <= 1.0 / self.get_parameter('rate_hz').value))
+            self.white_lost_ticks = self.white_lost_ticks + 1 if lost else 0
             need = self.get_parameter('construction.white_lost_ticks').value
             if self.white_lost_ticks >= need:
                 where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
@@ -3852,10 +3934,14 @@ class MissionControl(Node):
             self.get_logger().warn('Nav2 refused the goal - bt_navigator not active yet?')
             return
         self.nav_goal = handle
-        handle.get_result_async().add_done_callback(self.on_nav_result)
+        handle.get_result_async().add_done_callback(
+            lambda f, h=handle: self.on_nav_result(f, h))
 
-    def on_nav_result(self, future):
-        self.nav_result = future.result().status
+    def on_nav_result(self, future, handle):
+        # A goal cancelled for a retry reports CANCELED after the next one
+        # is out; only the goal in hand counts.
+        if handle is self.nav_goal:
+            self.nav_result = future.result().status
 
     def tick_tunnel_nav(self, now):
         """Nav2 from the front of the tunnel to its exit, then stop (ARX).
@@ -3872,13 +3958,20 @@ class MissionControl(Node):
         g = self.get_parameter
         waited = now - self.stage_since
 
+        give_up = g('tunnel.nav.give_up_s').value
+        if give_up > 0 and waited > give_up:
+            self.get_logger().warn(f'Nav2 not at the exit after {waited:.0f} s - giving up')
+            if self.nav_goal is not None:
+                self.nav_goal.cancel_goal_async()
+            self.stop('Nav2 timed out in the tunnel')
+            return
+
         if self.nav_phase is None:
             if not self.nav_client.server_is_ready():
                 if waited > g('tunnel.nav.server_wait_s').value:
                     self.get_logger().warn(
                         f'no Nav2 after {waited:.0f} s - is full.launch running with '
-                        f'nav:=true? Stopping at the tunnel front')
-                    self.stop('no Nav2')
+                        f'nav:=true? Still waiting', throttle_duration_sec=5.0)
                 return
             self.send_initial_pose()
             self.nav_pose_at = now
@@ -3903,26 +3996,41 @@ class MissionControl(Node):
                     self.send_initial_pose()
                     self.nav_pose_at = now
                 return
-            for client in self.clear_costmaps:
-                if client.service_is_ready():
-                    client.call_async(ClearEntireCostmap.Request())
-            self.send_nav_goal()
-            self.nav_phase = 'going'
+            self.nav_tries = 0
+            self.send_nav_goal_fresh()
+            return
+
+        if self.nav_phase == 'backup':
+            # nav_want is off for this, so control_lane takes the avoid
+            # command; straight back, the way the robot came in.
+            self.nav_want = False
+            speed = g('tunnel.nav.backup_speed').value
+            if speed > 0 and now - self.nav_backup_at < g('tunnel.nav.backup_m').value / speed:
+                self.set_avoid(True, angular=0.0, linear=-speed)
+                return
+            self.set_avoid(True, angular=0.0, linear=0.0)
+            self.set_avoid(False)
+            self.nav_want = True
+            # Cleared when the back-off began, so the scans since have put
+            # the obstacle back in before the planner looks.
+            self.send_nav_goal_fresh(clear=False)
             return
 
         if self.nav_refused:
             if waited > g('tunnel.nav.server_wait_s').value:
                 self.get_logger().warn(
                     f'Nav2 still refusing after {waited:.0f} s - its bringup probably '
-                    f'aborted (see lifecycle_manager_navigation). Stopping at the tunnel front')
-                self.stop('Nav2 not active')
-            elif now - self.nav_sent_at > 0.5:
+                    f'aborted (see lifecycle_manager_navigation). Still trying',
+                    throttle_duration_sec=5.0)
+            if now - self.nav_sent_at > 0.5:
                 self.send_nav_goal()
             return
 
         if self.nav_result is not None:
             if self.nav_result == GoalStatus.STATUS_SUCCEEDED:
-                self.get_logger().info(f'Nav2 reached the tunnel exit after {waited:.1f} s')
+                self.get_logger().info(
+                    f'Nav2 reached the tunnel exit after {waited:.1f} s, '
+                    f'{self.nav_tries} goal(s)')
                 if g('tunnel.nav.follow_lane_after').value:
                     # nav_want is not set on the next tick, so control_lane
                     # takes the wheel back and steers by the lane again.
@@ -3930,16 +4038,43 @@ class MissionControl(Node):
                 else:
                     self.stop('out of the tunnel')
             else:
-                self.get_logger().warn(
-                    f'Nav2 did not reach the exit (status {self.nav_result}) after {waited:.1f} s')
-                self.stop('Nav2 failed in the tunnel')
+                self.nav_retry(now, f'status {self.nav_result}')
             return
 
-        if waited > g('tunnel.nav.give_up_s').value:
-            self.get_logger().warn(f'Nav2 still going after {waited:.0f} s - cancelling')
+        if now - self.nav_sent_at > g('tunnel.nav.attempt_s').value:
             if self.nav_goal is not None:
                 self.nav_goal.cancel_goal_async()
-            self.stop('Nav2 timed out in the tunnel')
+            self.nav_retry(now, f'still going after {now - self.nav_sent_at:.0f} s')
+
+    def clear_nav_costmaps(self):
+        """Wipe both costmaps; the scan paints what is really there (ARX).
+
+        Marks from before the robot was localised, or a gap the last try saw
+        as shut, would otherwise stay.
+        """
+        for client in self.clear_costmaps:
+            if client.service_is_ready():
+                client.call_async(ClearEntireCostmap.Request())
+
+    def send_nav_goal_fresh(self, clear=True):
+        """Send the goal, on cleared costmaps unless they were just cleared (ARX)."""
+        if clear:
+            self.clear_nav_costmaps()
+        self.nav_tries += 1
+        self.send_nav_goal()
+        self.nav_phase = 'going'
+
+    def nav_retry(self, now, why):
+        """A goal that did not arrive: back off and send it again (ARX)."""
+        self.get_logger().warn(
+            f'Nav2 goal {self.nav_tries} did not reach the exit ({why}) - '
+            f'backing off {self.get_parameter("tunnel.nav.backup_m").value:.2f} m '
+            f'and trying again')
+        self.nav_goal = None
+        self.nav_result = None
+        self.clear_nav_costmaps()
+        self.nav_backup_at = now
+        self.nav_phase = 'backup'
 
     def tick_stopped(self):
         self.set_armed(MISSION_NONE)

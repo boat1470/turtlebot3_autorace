@@ -143,6 +143,10 @@ class DetectLane(Node):
                 # steering row is near, which stopped the corner-cutting, but
                 # near sees a curve late. 0 publishes nothing.
                 ('lane.speed_row', 300),
+                # ARX: with both lines fitted in FOLLOW_AUTO, how far their
+                # gap at lookahead_row may be from 2 x half_lane_px, as a
+                # fraction of it, before one line is set aside. 0 turns it off.
+                ('lane.pair_width_tol', 0.0),
                 # ARX: drop white pixels left of the yellow line's fit (plus
                 # this margin) before the white line is fitted. A lane's white
                 # line is always right of its yellow one, so anything white
@@ -246,6 +250,9 @@ class DetectLane(Node):
 
         self.pub_lane = self.create_publisher(Float64, '/detect/lane', 1)
         self.pub_lane_ahead = self.create_publisher(Float64, '/detect/lane_ahead', 1)
+        # ARX: see lane.pair_width_tol in make_lane.
+        self.pub_lane_gap = self.create_publisher(Float64, '/detect/lane_gap', 1)
+        self.prev_center_x = None
         # ARX: camera stamp to this node's output, in ms - the perception
         # half of the control loop (capture on the Pi, compress, Wi-Fi,
         # rectify, project, this node). Needs the Pi's clock and this one's
@@ -855,6 +862,29 @@ class DetectLane(Node):
         row = int(min(max(self.get_parameter('lane.lookahead_row').value, 0),
                       cv_image.shape[0] - 1))
 
+        # ARX: lane.pair_width_tol. Two lines are one lane only at a lane's
+        # width apart at the steering row. Entering 1A the yellow line leaves
+        # the frame through the near left corner, bending away as it goes,
+        # and its fit there is no longer this lane's edge - averaged in, it
+        # pulled the centre 50 px left and the robot turned early, stopped,
+        # then turned again (run 1031_1503). When the gap is off by more than
+        # the tolerance, keep the line whose own centre is nearer the last
+        # one published, so the centre does not jump. The gap goes out on
+        # /detect/lane_gap whenever both lines are fitted, to tune this by.
+        if has_left and has_right:
+            gap = float(self.right_fitx[row] - self.left_fitx[row])
+            self.pub_lane_gap.publish(Float64(data=gap))
+            tol = self.get_parameter('lane.pair_width_tol').value
+            if (self.follow_side == FOLLOW_AUTO and tol > 0
+                    and self.prev_center_x is not None
+                    and abs(gap - 2 * half) > tol * 2 * half):
+                from_yellow = self.left_fitx[row] + half
+                from_white = self.right_fitx[row] - half
+                if abs(from_white - self.prev_center_x) <= abs(from_yellow - self.prev_center_x):
+                    has_left = False
+                else:
+                    has_right = False
+
         # ARX: the yellow pair. The second yellow line counts only at a lane's
         # width from the first, give or take 30% - on the road before the lot
         # the right half can hold pieces of yellow that are not a wall of
@@ -1044,6 +1074,9 @@ class DetectLane(Node):
         if stamp is not None:
             now_ns = self.get_clock().now().nanoseconds
             self.pub_latency.publish(Float64(data=(now_ns - stamp) / 1e6))
+
+        if self.is_center_x_exist:
+            self.prev_center_x = float(centerx.item(row))
 
         if self.pub_image_type == 'compressed':
             if self.is_center_x_exist:

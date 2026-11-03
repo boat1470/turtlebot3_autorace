@@ -5,8 +5,26 @@
   ros__parameters:
     rate_hz: 10.0
 
+    # Hold the start until detect_lane keeps up (2026-11-01). Launched with
+    # Nav2 it ran at 3-17 frames/s for the first 3-4 s, and the robot weaved
+    # down the start straight, once 19 deg off before 1A (run 1101_1045).
+    # min_lane_hz of /detect/lane_state over the last lane_hz_hold_s, then
+    # off; past give_up_s it goes anyway. min_lane_hz 0 turns it off.
+    start:
+      min_lane_hz: 25.0
+      # 3 s with no gap over 100 ms, 2026-11-01: 2 s at 25 Hz still let the
+      # robot off with gaps of 120-290 ms to come in the first 3 s of driving
+      # (runs 1448, 1451, 1456), each one a lurch in the steering.
+      # 70 not 100: run 1507 passed with six gaps of 83-100 ms in its window
+      # and lost the lane for 133 ms a second after setting off. A settled
+      # stream's longest gap is 50-69 ms; replayed on seven runs, 70 waits
+      # at most ~11 s from the first lane message.
+      lane_hz_hold_s: 3.0
+      max_lane_gap_ms: 70.0
+      give_up_s: 30.0
+
     light:
-      enabled: false #เริ่มโดยการรอไฟแดงไหม
+      enabled: true #เริ่มโดยการรอไฟแดงไหม  - true 2026-11-03: the competition starts on the light
       # Frames of green, not ticks. Three frames at 10 fps is 0.3 s.
       confirm_frames: 3
       # Act on the change to green, not on a green that was already burning
@@ -146,7 +164,7 @@
         # is the number to put here.
         align: true
         align_heading_deg: 180.0
-        align_tolerance_deg: 10.0
+        align_tolerance_deg: 15.0
         align_speed: 0.14
         align_rate: 0.7      # rad/s, magnitude; turns whichever way is shorter
         align_timeout_s: 2.0
@@ -158,7 +176,7 @@
         # End the right arc at this odom heading; timeout_s then only backs
         # it up. Same angle however late the sign was confirmed.
         use_end_heading: false
-        end_heading_deg: -70.0
+        end_heading_deg: -75.0
         # After the arc, steer by the white line instead of both until odom
         # crosses hug_until_deg turning hug_release_turn, then both lines
         # again (2026-10-13). The right branch passes 180 twice: halfway
@@ -168,11 +186,13 @@
         hug_until_deg: 180.0
         hug_release_turn: right
         hug_timeout_s: 25.0
+
+
         both_ticks: 3
         min_s: 0.5
       # The fixed four-move version. Only used when left_arc is off.
       left_script:
-        enabled: true
+        enabled: false
         heading_deg: 180.0
         heading_tolerance_deg: 3.0
         first_m: 0.30
@@ -208,7 +228,7 @@
         # frame, `line + 280` put the steering target at 714 of 1000, and the
         # robot turned right into the wrong branch while reporting
         # lane_state 1 the whole way.
-        enabled: true
+        enabled: false
         left_deg: 0.0
         right_deg: 0.0
 
@@ -315,7 +335,7 @@
         side: right
         # 0.22 on 2026-10-14 (was 0.25): run 1014_2304 sat ~7 cm outside the
         # lane centre round 7A. 0.14 m/s keeps the outer wheel at 0.19.
-        radius_m: 0.22
+        radius_m: 0.23
         # 0.14. 0.15 tried 2026-10-25 (1025_1058, 1025_1327): no faster - the
         # arc ends where both lines come back, not after a time - and the curve
         # before construction overran to +34 deg.
@@ -546,7 +566,9 @@
           # to rest at -170.2, 10 past 180 (1025_1438); at 2.0 with 15 here,
           # -176.2 (1025_1503). The tick that gets there now stops rather than
           # sending one more turn. Absolute mode only.
-          in_place_stop_early_deg: 8.0
+          # 16 on 2026-11-01: on the 84 mm wheels 8 still swung on to
+          # -170..-173, 7-10 past 180 (1031_1503, 1101_0104, 1835, 2042, 2102).
+          in_place_stop_early_deg: 16.0
 
           # Measured over the whole seven-phase move, not one phase: it is
           # timed from entering the stage. A real run came to
@@ -907,8 +929,12 @@
         # tail to the bay, robot stopped facing -90 down the lot. Facing up
         # (180) backs into its left bay, facing down (0) into its right.
         absolute: true
-        face_left_deg: 180.0
-        face_right_deg: -5.0
+        # 84 mm wheels, 2026-11-01: the turn comes to rest 17-20 deg past
+        # its target every run (-5 -> +12..+15 in 1031_1503, 1101_0104,
+        # 1835, 2042; turn_rate 2.0 in 2102 still +13), so the targets sit
+        # 18 deg early, the way of the turn. Were 180.0 / -5.0.
+        face_left_deg: -162.0
+        face_right_deg: -23.0
         # 40 on 2026-10-24 (was 20): at 2.4 rad/s a 10 Hz tick is ~14 deg, so
         # 20 was barely one tick and the stop landed anywhere from -32 to -15
         # (1024_1716, 1024_1721). Slower near the end, finer steps.
@@ -944,8 +970,14 @@
         # 0.506, four runs agreeing to 3.5 mm. The bay centres at x 0.754 and
         # x 0.258 are therefore 0.278 and 0.218 away. A single figure would
         # leave 4 mm at one end of a bay with only 68 mm to give.
-        into_left_m: 0.20      # 2026-10-13, on the real course (0.278 was the simulator)
-        into_right_m: 0.20     # 0.20 on 2026-10-24 (was 0.22). Deepest is ~4 cm past this (the robot coasts after the stop): 0.18 gave 0.216, the bay centre (1024_1755)
+        # 0.17 both on 2026-10-31 (were 0.20): the 84 mm wheels backed in too
+        # deep - it coasts further at the higher speed, and the turn before it
+        # ended ~18 deg past square (fixed 2026-11-01, park.face_*_deg).
+        # Odom distance itself is about right: 1101_2117 lies on curve_map at
+        # scale 1.00, so the 0.040-vs-0.0428 wheels.radius story told here
+        # before (odom ~7% short) did not hold.
+        into_left_m: 0.17      # 2026-10-13 0.20, on the real course (0.278 was the simulator)
+        into_right_m: 0.18     # 0.18 on 2026-11-02 (0.19 parked 0.180 in, 1102_0042; 0.20 parked 0.196, 1102_0034). 0.20 again on 2026-11-01 (from 0.17): the right bay wanted 3 cm deeper once the turn ended square at -5 (1101_2117). 0.20 on 2026-10-24 (was 0.22). Deepest is ~4 cm past this (the robot coasts after the stop): 0.18 gave 0.216, the bay centre (1024_1755)
 
         # Stand still in the bay. Zero is what was asked for; the knob is
         # here because being seen stopped in it may be what actually scores.
@@ -1054,7 +1086,10 @@
         # 0.25 on 2026-10-24 (was 0.20): stopped at 0.19 the detector saw four
         # bands, called it nothing on the gap spread and the robot left with the
         # bar still down (run 1024_2343). At 0.23 it alternated 3 and 4 bands.
-        stop_m: 0.25
+        # 0.30 on 2026-11-01: on the 84 mm wheels the stop at 0.24 coasted to
+        # 0.199, the detector called it nothing and the robot left after 1 s
+        # (run 1031_1503) - the same way out as 1024_2343.
+        stop_m: 0.30
       # A range older than this does not count (Pi node stopped, Wi-Fi gap).
       range_max_age_s: 0.5
 
@@ -1167,7 +1202,11 @@
         tolerance_deg: 30.0
 
       # Reports of the board needed inside vote_max_age_s.
-      confirm_votes: 3
+      # 2 on 2026-11-03 (was 3). The board only counts from min_width_px
+      # (~0.33 m) until it leaves the frame (~0.25 m); on the 84 mm wheels
+      # that window gave 2-9 reports over twelve runs, and 1103_0208 got 2
+      # and drove into the tunnel without stopping at its front.
+      confirm_votes: 2
       vote_max_age_s: 3.0
 
       # ARX 2026-10-17: stop at the front of the tunnel for now - the run
@@ -1193,7 +1232,8 @@
       nav:
         # false on 2026-10-25: stop at the tunnel front (LiDAR <= stop_ahead_m
         # after the sign) instead of handing over to Nav2.
-        enabled: false
+        # true again on 2026-11-03, to drive mission 6 through the tunnel.
+        enabled: true
         # Where the front is on the tunnel map, and which way the robot faces
         # there - map frame. Read off RViz 2026-10-17.
         start_x: 0.0
@@ -1214,9 +1254,17 @@
         localise_s: 3.0
         localise_tol_m: 0.25
         server_wait_s: 5.0
-        give_up_s: 60.0
-        # At the exit, follow the lane on (true) or stop. A failed Nav2 run
-        # stops either way - it is somewhere inside the tunnel, not on a lane.
+        # 2026-11-03: the obstacles inside are re-laid on the competition day
+        # (ROBOTIS), so a goal that does not arrive is tried again instead of
+        # ending the run - back off backup_m, clear the costmaps, re-send.
+        # attempt_s cuts a goal stuck that long against something; give_up_s
+        # 0 never stops (was 60, and a failed goal stopped at once).
+        give_up_s: 0.0
+        attempt_s: 40.0
+        backup_m: 0.05
+        backup_speed: 0.05
+        # At the exit, follow the lane on (true) or stop. Nav2 not arriving
+        # is retried (above), never handed back to the lane mid-tunnel.
         # 2026-10-18: stop - the run ends at the tunnel exit.
         follow_lane_after: false
 
@@ -1296,12 +1344,25 @@
       # for about 7 Hz. Together those put the D term near where it was
       # designed: (0.0015 / 0.0037) x (0.53 / 0.14) = 1.5x the original, not
       # eleven.
-      kd: 0.003 #0.015
+      #
+      # 0.0023 on 2026-11-01 (was 0.003): the 84 mm wheels drive ~30% faster
+      # than commanded, so the lane moves across the image ~40% faster and
+      # the same kd gave a D term ~1.4x bigger. Out of the lot round 18B it
+      # swung +0.55/-0.35 rad/s every ~0.45 s and the steering pulsed
+      # 0 <-> 0.9 (1101_2147; 1025_1327 on the small wheels stayed smooth).
+      # 0.003 / 1.3. See graph/1101_2147/18B_oscillation.png.
+      kd: 0.0023 #0.003 #0.015
 
       # Most the published angular velocity may change between one lane
       # message and the next. The backstop for smoothness whatever the error
       # does; 0 turns it off.
       # Scaled with the speed, same reason as kp.
+      #
+      # 0.25 on 2026-11-01 (was 0.49), trying. Scaled by 0.2 / 0.07 at full
+      # speed, 0.49 let the command move 1.4 rad/s in one message - no limit
+      # at all. On the 84 mm wheels a lane message gap at the start set off
+      # -1.1 / +1.3 rad/s swings and a 17 deg swerve before 1A (runs 1045,
+      # 1104); 0.25 caps a step at ~0.7.
       max_angular_step: 0.49
 
       # kp and max_angular_step scale with the speed being driven, as
