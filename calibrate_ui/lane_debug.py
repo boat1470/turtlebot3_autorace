@@ -242,7 +242,7 @@ RUNS = os.path.expanduser('~/runs')
 RECORD_TOPICS = (
     '/detect/image_lane/compressed', '/detect/image_yellow_lane_marker/compressed',
     '/detect/image_white_lane_marker/compressed',
-    '/detect/lane', '/detect/lane_ahead', '/detect/lane_state',
+    '/detect/lane', '/detect/lane_ahead', '/detect/lane_gap', '/detect/lane_state',
     '/detect/yellow_line_reliability', '/detect/white_line_reliability',
     '/detect/traffic_sign', '/detect/image_traffic_sign/compressed',
     '/detect/image_traffic_sign_mask/compressed',

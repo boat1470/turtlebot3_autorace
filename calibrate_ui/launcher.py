@@ -59,6 +59,7 @@ sign board  the junction sign is an ESP32 with two arms, its own MQTT
 
 import argparse
 import collections
+import math
 import os
 import re
 import shlex
@@ -67,6 +68,8 @@ import socket
 import subprocess
 import threading
 import time
+
+import yaml
 
 HOST = 'iotcentral@192.168.0.101'
 
@@ -388,6 +391,12 @@ class Window:
         root.protocol('WM_DELETE_WINDOW', self.close)
 
         self.rows = []
+        self.odom_label = None
+        self.odom_text = 'odom: not read'   # set from a worker thread, shown by tick
+        self.odom_colour = '#777'
+        self.reset_button = None
+        self.reset_nag = False      # blink 'reset odom' from a mission stop to a reset
+        self.blink = 0
 
         def group(title, jobs):
             box = ttk.LabelFrame(root, text=title, padding=8)
@@ -412,6 +421,20 @@ class Window:
             box = group(f'Pi  ({RemoteJob.host})', pi)
             for i, job in enumerate(pi):
                 row(box, i, job)
+                if job.tag == 'robot':
+                    # Back to x 0, y 0, heading 0 without restarting bringup:
+                    # every heading gate in mission_control is measured from
+                    # where odom started. turtlebot3_node's own service.
+                    self.reset_button = tk.Button(box, text='reset odom',
+                                                  command=self.reset_odom)
+                    self.reset_button.grid(row=i, column=5, padx=(8, 2), sticky='w')
+                    self.reset_bg = (self.reset_button.cget('background'),
+                                     self.reset_button.cget('activebackground'))
+                    tk.Button(box, text='read', command=self.read_odom
+                              ).grid(row=i, column=6, padx=2, sticky='w')
+                    self.odom_label = tk.Label(box, text=self.odom_text, width=30,
+                                               anchor='w', fg='#777')
+                    self.odom_label.grid(row=i, column=7, padx=4, sticky='w')
 
         self.all_button = None
         if self.calib:
@@ -559,7 +582,10 @@ class Window:
     def toggle_mission(self):
         if self.mission.running():
             self.mission.stop()
+            # The next run measures every heading from where odom is now.
+            self.reset_nag = True
             return
+        self.reset_nag = False
         busy = [j for j in self.calib if j.running()]
         for job in busy:
             job.stop()
@@ -663,6 +689,47 @@ class Window:
         else:
             job.start()
 
+    def reset_odom(self):
+        """Call /reset_odometry from here, off the Tk thread (ros2 CLI takes ~2 s)."""
+        def call():
+            cmd = ['ros2', 'service', 'call', '/reset_odometry', 'std_srvs/srv/Trigger']
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                ok = 'success=True' in r.stdout
+                if ok:
+                    self.reset_nag = False
+                self.out.append('[odom] reset - odom is at 0, 0, 0 again' if ok else
+                                f'[odom] reset failed: {(r.stdout + r.stderr).strip()[-200:]}')
+            except (OSError, subprocess.TimeoutExpired) as e:
+                self.out.append(f'[odom] reset failed: {e} - is bringup up, ROS_DOMAIN_ID 30?')
+            self.fetch_odom()
+        self.out.append('[odom] calling /reset_odometry ...')
+        self.odom_text, self.odom_colour = 'odom: resetting ...', '#777'
+        threading.Thread(target=call, daemon=True).start()
+
+    def read_odom(self):
+        self.odom_text, self.odom_colour = 'odom: reading ...', '#777'
+        threading.Thread(target=self.fetch_odom, daemon=True).start()
+
+    def fetch_odom(self):
+        """One /odom message as x, y and heading - green when it is at the start."""
+        cmd = ['ros2', 'topic', 'echo', '/odom', '--once', '--field', 'pose.pose']
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            pose = yaml.safe_load(r.stdout.split('---')[0])
+            x, y = float(pose['position']['x']), float(pose['position']['y'])
+            qz, qw = float(pose['orientation']['z']), float(pose['orientation']['w'])
+        except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError,
+                yaml.YAMLError) as e:
+            self.odom_text, self.odom_colour = f'odom: no reading ({type(e).__name__})', '#c0392b'
+            return
+        yaw = math.degrees(2 * math.atan2(qz, qw))
+        yaw = (yaw + 180) % 360 - 180
+        at_start = abs(x) < 0.05 and abs(y) < 0.05 and abs(yaw) < 5
+        self.odom_text = f'odom: x {x:+.2f}  y {y:+.2f}  yaw {yaw:+.1f}°'
+        self.odom_colour = '#1e8449' if at_start else '#c0392b'
+        self.out.append(f'[odom] {self.odom_text[6:]}')
+
     def toggle_calib(self):
         if any(j.running() for j in self.calib):
             for job in self.calib:
@@ -681,6 +748,14 @@ class Window:
             self.mission_pending = False
             self.start_mission()
         self.tick_sign()
+        if self.odom_label is not None:
+            self.odom_label.config(text=self.odom_text, fg=self.odom_colour)
+        if self.reset_button is not None:
+            self.blink += 1
+            on = self.reset_nag and self.blink // 2 % 2 == 0
+            self.reset_button.config(
+                background='#e67e22' if on else self.reset_bg[0],
+                activebackground='#f39c12' if self.reset_nag else self.reset_bg[1])
         if self.out:
             at_end = self.log.yview()[1] > 0.999
             while self.out:
