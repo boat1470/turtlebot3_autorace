@@ -56,6 +56,10 @@ from rclpy.node import Node
 from rclpy.time import Time
 from std_msgs.msg import Bool, Float32, Float64, UInt8
 from tf2_ros import Buffer, TransformListener
+try:
+    from turtlebot3_msgs.srv import Sound
+except ImportError:  # no turtlebot3_msgs: start.sound does nothing
+    Sound = None
 
 # /arx/traffic_light - must match detect_traffic_light.py
 LIGHT_UNKNOWN = 0
@@ -129,6 +133,8 @@ STAGE_APPROACH_BAR = 'approach_bar'
 STAGE_WAIT_BAR = 'wait_bar'
 STAGE_DRIVE_TO_TUNNEL = 'drive_to_tunnel'
 STAGE_TUNNEL_NAV = 'tunnel_nav'
+# ARX 2026-11-04: Nav2 stops in front of the exit facing it; this drives out straight.
+STAGE_TUNNEL_EXIT = 'tunnel_exit'
 
 # /detect/lane_state, from detect_lane: which line it is steering by.
 LANE_STATE_FOR_SIDE = {FOLLOW_YELLOW: 1, FOLLOW_WHITE: 3}
@@ -162,6 +168,7 @@ STAGES = frozenset({
     STAGE_WAIT_BAR,
     STAGE_DRIVE_TO_TUNNEL,
     STAGE_TUNNEL_NAV,
+    STAGE_TUNNEL_EXIT,
     STAGE_STOPPED,
 })
 
@@ -232,7 +239,15 @@ class MissionControl(Node):
         # still lost the lane for 120-290 ms in their first three seconds,
         # each followed by a lurch in the steering. 0 drops the gap check.
         self.declare_parameter('start.min_lane_hz', 25.0)
+        # ARX 2026-11-04: with Nav2 launched, the warm-up also waits until
+        # navigate_to_pose is up and then a whole lane_hz_hold_s window after
+        # it - Nav2 activating (~13 s from launch) is the heaviest load of the
+        # start, and in 1104_2243 the warm-up passed 1 s before it finished.
+        # Set by full.launch.py (wait_nav), not mission.yaml.
+        self.declare_parameter('start.wait_nav', False)
         self.declare_parameter('start.lane_hz_hold_s', 3.0)
+        # ARX: the OpenCR's tune when the warm-up is over - see sound_ready.
+        self.declare_parameter('start.sound', 3)
         self.declare_parameter('start.max_lane_gap_ms', 100.0)
         self.declare_parameter('start.give_up_s', 30.0)
 
@@ -947,6 +962,10 @@ class MissionControl(Node):
         # so the robot reaches the stop with about nine seconds to spare.
         self.declare_parameter('level.enabled', True)
         self.declare_parameter('level.confirm_ticks', 3)
+        # ARX 2026-11-04: level_source both only - ticks of the camera's DOWN
+        # (flicker-tolerant, cam_down_run) before creeping. The ultrasonic
+        # then does the distances, so starting early costs only a longer creep.
+        self.declare_parameter('level.both_confirm_ticks', 2)
         # Only count "down" while facing the crossing's road - see heading_ok.
         # Range alone cannot tell the bar from a wall met in a curve.
         self.declare_parameter('level.heading.enabled', True)
@@ -957,6 +976,12 @@ class MissionControl(Node):
         # road is clear. Waiting for a run of UP alone can stall on that
         # flicker.
         self.declare_parameter('level.clear_ticks', 5)
+        # Camera: the bar is up once DOWN has not been reported for
+        # clear_quiet_s - or clear_quiet_unsure_s when fewer than
+        # down_frames_sure DOWN reports came while waiting (ARX 2026-11-04).
+        self.declare_parameter('level.clear_quiet_s', 0.5)
+        self.declare_parameter('level.clear_quiet_unsure_s', 3.0)
+        self.declare_parameter('level.down_frames_sure', 15)
         # Where to stand. Nearer than 0.20 m the camera has nothing to look
         # at: it sits 0.076 m ahead of the model origin, which is 0.038 m
         # ahead of the robot's own nose, so at 0.06 m it is already past the
@@ -978,6 +1003,10 @@ class MissionControl(Node):
         # two. The range is what aims; this is what stops a bad one running
         # the robot into the bar.
         self.declare_parameter('level.max_creep_m', 0.60)
+        # ARX 2026-11-05, level_source both: the camera starts the approach
+        # from as far as ~0.95 m, so the cap is longer, and the robot keeps
+        # lane speed while the ultrasonic reads past slow_m.
+        self.declare_parameter('level.both_max_creep_m', 1.0)
         # What decides at the crossing. 'ultrasonic': /detect/level_range
         # alone, against a threshold per stage - slow under slow_m, stop at
         # stop_m, go once it is past clear_m. 'camera': /detect/level_bar
@@ -992,6 +1021,10 @@ class MissionControl(Node):
         # The camera's range is an estimate off the bands' span and it goes
         # blind under ~0.20 m, so it does not share the ultrasonic's numbers.
         self.declare_parameter('level.camera.slow_m', 0.40)
+        # ARX 2026-11-04: a tick counts as DOWN if any frame in the last this
+        # many seconds was DOWN - see cam_recent_range. 1104_2236 and _2310
+        # saw DOWN on every other frame and never had 5 ticks in a row.
+        self.declare_parameter('level.camera.down_window_s', 0.3)
         self.declare_parameter('level.camera.stop_m', 0.20)
         self.declare_parameter('level.clear_m', 0.20)
         # A range older than this is no range - the Pi node stopped, or the
@@ -1053,6 +1086,15 @@ class MissionControl(Node):
         self.declare_parameter('tunnel.heading.enabled', True)
         self.declare_parameter('tunnel.heading.center_deg', -90.0)
         self.declare_parameter('tunnel.heading.tolerance_deg', 30.0)
+        # ARX 2026-11-03: and only inside this box on /odom - the heading
+        # alone also holds on the run down past 14A and 11A. odom starts at
+        # the start line, so this holds on a full run only; a preset starts
+        # odom wherever it was put, and skips the box.
+        self.declare_parameter('tunnel.zone.enabled', False)
+        self.declare_parameter('tunnel.zone.x_min', -3.2)
+        self.declare_parameter('tunnel.zone.x_max', -2.0)
+        self.declare_parameter('tunnel.zone.y_min', 1.0)
+        self.declare_parameter('tunnel.zone.y_max', 3.0)
         self.declare_parameter('tunnel.confirm_votes', 3)
         # Stop at the front of the tunnel instead of going in. For now, until
         # what to do inside is decided. The front is two things in order: the
@@ -1066,6 +1108,7 @@ class MissionControl(Node):
         self.declare_parameter('tunnel.use_sign', True)
         self.declare_parameter('tunnel.heading_hold_s', 1.0)
         self.declare_parameter('tunnel.stop_ahead_m', 0.25)
+        self.declare_parameter('tunnel.slow_ahead_m', 0.6)
         # Readings in a row - /detect/front_range jumps for a scan now and
         # then (0.437 -> 0.242 -> 0.534 in one run), and one is not a wall.
         self.declare_parameter('tunnel.stop_ahead_ticks', 2)
@@ -1130,10 +1173,62 @@ class MissionControl(Node):
         self.declare_parameter('tunnel.nav.attempt_s', 40.0)
         self.declare_parameter('tunnel.nav.backup_m', 0.05)
         self.declare_parameter('tunnel.nav.backup_speed', 0.05)
+        # ARX 2026-11-06: a goal the planner could not plan (error 2xx from
+        # compute_path) holds still replan_wait_s on cleared costmaps and is
+        # sent again - no back-off. In 1106_0238 the gap by the right wall
+        # was painted shut for a moment; four back-offs in a row took the
+        # robot 0.35 m back down it and lost ~8 s. After replan_tries plan
+        # failures in a row it backs off once anyway: the robot may be in an
+        # obstacle's lethal zone (1104_0759), and backing gets it out.
+        self.declare_parameter('tunnel.nav.replan_wait_s', 0.5)
+        self.declare_parameter('tunnel.nav.replan_tries', 4)
+        # ARX 2026-11-06: replan_tries plan failures in a row move the goal
+        # down the doorway's centre line by fallback_step_m, up to
+        # fallback_max_m below goal_y, before any back-off. 1106_0311's goal
+        # at the doorway's mouth could not be planned 48 times, and the
+        # back-offs walked the robot 0.65 m away from it. tunnel_exit drives
+        # the rest from wherever Nav2 stops.
+        self.declare_parameter('tunnel.nav.fallback_step_m', 0.05)
+        self.declare_parameter('tunnel.nav.fallback_max_m', 0.15)
         # At the exit: follow the lane on from there (true) or stop. A failed
         # or timed-out Nav2 run stops either way - the robot is somewhere in
         # the tunnel, not on a lane.
         self.declare_parameter('tunnel.nav.follow_lane_after', True)
+        # ARX 2026-11-04: the way out in two steps. Nav2's goal is a point in
+        # front of the exit, facing it (goal_x/y/yaw); from there this drives
+        # straight out on heading_deg (map) for straight_m, steering on odom.
+        # Nav2 took the doorway on a slant and hit its corners - 1104_2256
+        # swung from 78 to 128 deg in it and stuck on the left post.
+        # max_s ends the straight run if it has not covered straight_m by
+        # then (against something), and goes on as if it had.
+        self.declare_parameter('tunnel.exit.enabled', True)
+        self.declare_parameter('tunnel.exit.heading_deg', 90.0)
+        self.declare_parameter('tunnel.exit.end_y', 1.85)
+        self.declare_parameter('tunnel.exit.straight_m', 0.60)
+        self.declare_parameter('tunnel.exit.speed', 0.12)
+        self.declare_parameter('tunnel.exit.max_s', 8.0)
+        # The doorway's centre line (map x), and how it is steered onto - see
+        # tick_tunnel_exit. spin_deg: further off the aim than this turns on
+        # the spot first.
+        self.declare_parameter('tunnel.exit.door_x', 1.85)
+        self.declare_parameter('tunnel.exit.lookahead_m', 0.15)
+        # ARX 2026-11-06: once within on_line_m of the line, or into the
+        # doorway (y >= door_y), aim far_lookahead_m ahead instead - with
+        # 0.06 a 1 cm wobble in AMCL's x swung the aim ~10 deg and the
+        # robot weaved 81-95 deg through the door (1106_0331).
+        self.declare_parameter('tunnel.exit.on_line_m', 0.01)
+        self.declare_parameter('tunnel.exit.door_y', 1.55)
+        self.declare_parameter('tunnel.exit.far_lookahead_m', 0.15)
+        # ARX 2026-11-06: mission_control calls the goal reached itself when
+        # TF has the robot within arrive_m of it (0 = leave it to Nav2).
+        # RPP stops and turns on the spot to the goal's heading once it is
+        # within xy_goal_tolerance, but Nav2's goal checker sometimes did
+        # not agree it was there, and RPP swung +-25 deg until it did:
+        # 3.6 s in 1106_0331, ~9 s in 0253 / 0300.
+        self.declare_parameter('tunnel.nav.arrive_m', 0.10)
+        self.declare_parameter('tunnel.exit.kp', 2.0)
+        self.declare_parameter('tunnel.exit.max_angular', 0.6)
+        self.declare_parameter('tunnel.exit.spin_deg', 25.0)
 
         self.declare_parameter('rate_hz', 10.0)
 
@@ -1175,11 +1270,8 @@ class MissionControl(Node):
         # The robot still has to be standing somewhere that stage makes sense
         # from. full.launch.py's `start` argument sets the two together.
         self.declare_parameter('start_stage', STAGE_WAIT_GREEN)
-        # Skip the level crossing and go straight on to the tunnel (ARX). Set
-        # from the command line like start_stage, not in mission.yaml, for the
-        # same reason: a run that leaves a mission out is decided for that run.
-        # level.enabled: false does the same thing from the file.
-        self.declare_parameter('skip_level', False)
+        # skip_level (command line) removed 2026-11-05; level.enabled: false
+        # in mission.yaml still leaves the crossing out.
 
         self.stage = self.get_parameter('start_stage').value
         if self.stage not in STAGES:
@@ -1196,7 +1288,14 @@ class MissionControl(Node):
                 f'starting at stage {self.stage} - the missions before it are '
                 f'skipped, so this is a test run, not a scoring one')
         self.stage_since = None
+        # ARX: a preset that starts past wait_green still waits there for
+        # detect_lane to settle (start.min_lane_hz), standing still, before
+        # its first stage ticks - it used to set off on the first frames.
+        self.warming_up = self.stage != STAGE_WAIT_GREEN
+        # Started at the start line, so /odom is in the course's own frame.
+        self.full_run = self.stage == STAGE_WAIT_GREEN
         self.light = LIGHT_UNKNOWN
+        self.light_wait_from = None     # ARX: when the wait for green began
         self.green_frames = 0
         self.not_green_frames = 0
         self.seen_not_green = False
@@ -1230,6 +1329,15 @@ class MissionControl(Node):
         # gone for a single frame before yellow goes too, and tick missed it.
         self.white_lost_at = None
         self.lane_wait_said = None
+        self.ready_sounded = False
+        self.sound_wanted_at = None     # warm-up done, beep not sent yet
+        self.nav_ready_at = None        # when navigate_to_pose first answered
+        self.lane_was_ready = False     # wait_green's lane check has passed once
+        self.exit_heading = None        # odom heading of the straight way out
+        self.exit_mark = None
+        self.exit_on_line = False
+        self.sound_client = (self.create_client(Sound, '/sound')
+                             if Sound is not None else None)
         self.yellow_ok = None
         self.white_ok = None
         # Whether the last report was counted, so the log can say when that
@@ -1334,10 +1442,15 @@ class MissionControl(Node):
         # Latest report from detect_level, and how many ticks in a row it has
         # said the same thing.
         self.bar = None
+        self.bar_down_at = None         # ARX: when detect_level last said DOWN
+        self.bar_down_frames = 0        # ARX: DOWN reports since wait_bar began
         self.bar_range = None           # the ultrasonic's, /detect/level_range
         self.bar_range_at = None
         self.cam_range = None           # ARX: the camera's, /detect/level_range_cam
         self.cam_range_at = None
+        self.cam_down_range = None      # last range from a DOWN frame
+        self.bar_stop_by_cap = False    # approach_bar ended on max creep, not stop_m
+        self.cam_down_range_at = None
         self.us_near_seen = False       # ARX: both - inside clear_m during the creep
         self.stop_ticks = 0             # ARX: ultrasonic ticks in a row inside stop_m
         self.bar_ticks = 0
@@ -1398,6 +1511,10 @@ class MissionControl(Node):
         self.nav_backup_at = None
         self.nav_goal = None
         self.nav_result = None
+        self.nav_error = (0, '')
+        self.nav_plan_fails = 0
+        self.nav_goal_drop = 0.0
+        self.nav_replan_at = None
         self.nav_pose_at = None
         self.amcl_pose_at = None
         self.nav_refused = False
@@ -1492,6 +1609,9 @@ class MissionControl(Node):
     def on_bar(self, msg):
         """Whether detect_level can see the crossing bar, and how (ARX)."""
         self.bar = msg.data
+        if msg.data == BAR_DOWN:
+            self.bar_down_at = self.now()
+            self.bar_down_frames += 1
 
     def on_bar_range(self, msg):
         """How far the ultrasonic says the bar is, in metres (ARX)."""
@@ -1502,6 +1622,22 @@ class MissionControl(Node):
         """How far the camera detector estimates the bar is, in metres (ARX)."""
         self.cam_range = msg.data
         self.cam_range_at = self.now()
+        # ARX 2026-11-04: the last real range, from a DOWN frame. A frame with
+        # no bar reads 9.9, and at night detect_level flickers DOWN / nothing
+        # frame to frame, so the latest value is 9.9 about half the time.
+        if msg.data < 5.0:
+            self.cam_down_range = msg.data
+            self.cam_down_range_at = self.cam_range_at
+
+    def cam_recent_range(self):
+        """The camera's bar range from a DOWN frame in the last
+        level.camera.down_window_s, or None (ARX)."""
+        if self.cam_down_range_at is None:
+            return None
+        if self.now() - self.cam_down_range_at > self.get_parameter(
+                'level.camera.down_window_s').value:
+            return None
+        return self.cam_down_range
 
     def heading_ok(self, prefix=None):
         """Whether the robot is pointing a way this mission's board can be seen from."""
@@ -1525,7 +1661,20 @@ class MissionControl(Node):
         tol = self.get_parameter(f'{prefix}.heading.tolerance_deg').value
         # Shortest angular distance, so a window straddling +/-180 works like
         # any other.
-        return abs((self.yaw - want + 180.0) % 360.0 - 180.0) <= tol
+        if abs((self.yaw - want + 180.0) % 360.0 - 180.0) > tol:
+            return False
+        return prefix != 'tunnel' or self.in_tunnel_zone()
+
+    def in_tunnel_zone(self):
+        """Whether odom has the robot in tunnel.zone, or the box is not used (ARX)."""
+        g = self.get_parameter
+        if not g('tunnel.zone.enabled').value or not self.full_run:
+            return True
+        if self.pos is None:
+            return False
+        x, y = self.pos
+        return (g('tunnel.zone.x_min').value <= x <= g('tunnel.zone.x_max').value
+                and g('tunnel.zone.y_min').value <= y <= g('tunnel.zone.y_max').value)
 
     def on_sign(self, msg):
         """Keep the last `window` reports so they can be voted on."""
@@ -1544,9 +1693,14 @@ class MissionControl(Node):
                 prefix = self.sign_prefix()
                 want = self.get_parameter(f'{prefix}.heading.center_deg').value
                 tol = self.get_parameter(f'{prefix}.heading.tolerance_deg').value
+                box = ''
+                if prefix == 'tunnel' and not self.in_tunnel_zone():
+                    at = 'no odom' if self.pos is None else \
+                        f'at ({self.pos[0]:+.2f}, {self.pos[1]:+.2f})'
+                    box = f', and inside tunnel.zone ({at})'
                 self.get_logger().info(
                     f'facing {where} - sign reports ignored, '
-                    f'want {want:+.0f}+/-{tol:.0f}')
+                    f'want {want:+.0f}+/-{tol:.0f}{box}')
         if not ok:
             self.sign_rejected += 1
             return
@@ -1636,23 +1790,67 @@ class MissionControl(Node):
         edges = [now - hold] + recent + [now]
         gap = max(b - a for a, b in zip(edges, edges[1:])) * 1000
         waited = now - self.stage_since
-        if hz >= need and (max_gap <= 0 or gap <= max_gap) and waited >= hold:
+        nav_ok = True
+        if self.get_parameter('start.wait_nav').value:
+            if self.nav_ready_at is None and self.nav_client.server_is_ready():
+                self.nav_ready_at = now
+                self.get_logger().info('Nav2 is up - warm-up counts from here')
+            nav_ok = self.nav_ready_at is not None and now - self.nav_ready_at >= hold
+        if nav_ok and hz >= need and (max_gap <= 0 or gap <= max_gap) and waited >= hold:
             if self.lane_wait_said is not None:
                 self.get_logger().info(
-                    f'detect_lane at {hz:.0f} Hz, longest gap {gap:.0f} ms - starting')
+                    f'\033[31mdetect_lane at {hz:.0f} Hz, longest gap {gap:.0f} ms - '
+                    f'starting\033[0m')
                 self.lane_wait_said = None
+            self.sound_ready()
             return True
         if waited > self.get_parameter('start.give_up_s').value:
             self.get_logger().warn(
                 f'detect_lane only at {hz:.0f} Hz, longest gap {gap:.0f} ms '
                 f'after {waited:.0f} s - starting anyway')
+            self.sound_ready()
             return True
         if self.lane_wait_said is None or now - self.lane_wait_said >= 2.0:
             self.get_logger().info(
                 f'waiting for detect_lane: {hz:.0f} Hz, longest gap {gap:.0f} ms - '
-                f'want {need:.0f} Hz and no gap over {max_gap:.0f} ms for {hold:.0f} s')
+                f'want {need:.0f} Hz and no gap over {max_gap:.0f} ms for {hold:.0f} s'
+                + ('' if nav_ok else ' - and for Nav2 to be up'))
             self.lane_wait_said = now
         return False
+
+    def sound_ready(self):
+        """Beep once on the OpenCR when the warm-up is over (ARX).
+
+        turtlebot3_node's /sound, start.sound the tune (0 none, 1 on,
+        2 low battery, 3 error, 4/5 button). Not waited on: no bringup, no beep.
+        """
+        if self.ready_sounded or self.sound_wanted_at is not None:
+            return
+        # ARX 2026-11-04: asked for here, sent from sound_poll on the next
+        # ticks. It used to give up at once if /sound was not discovered
+        # yet - in 1104_2243 the bringup's sound server came up 3 s before
+        # the warm-up ended, and there was no beep and nothing in the log.
+        self.sound_wanted_at = self.now()
+
+    def sound_poll(self, now):
+        """Send the warm-up beep once /sound is there, for up to 10 s (ARX)."""
+        if self.sound_wanted_at is None or self.ready_sounded:
+            return
+        tune = self.get_parameter('start.sound').value
+        if tune <= 0:
+            self.ready_sounded = True
+            return
+        if self.sound_client is not None and self.sound_client.service_is_ready():
+            self.ready_sounded = True
+            self.sound_client.call_async(Sound.Request(value=int(tune)))
+            self.get_logger().info(
+                f'warm-up beep: sound {tune} sent '
+                f'{now - self.sound_wanted_at:.1f} s after the warm-up')
+        elif now - self.sound_wanted_at > 10.0:
+            self.ready_sounded = True
+            self.get_logger().warn(
+                'no warm-up beep: /sound not found in 10 s - is the robot bringup '
+                '(turtlebot3_node) up on the same ROS_DOMAIN_ID?')
 
     def on_yellow_ok(self, msg):
         """How much of the frame the yellow line fills, 0 to 100."""
@@ -1708,7 +1906,20 @@ class MissionControl(Node):
             self.stage_since = now
         self.max_vel_want = None
         self.nav_want = False
-        self.tick_stage(now)
+        self.sound_poll(now)
+        if self.warming_up:
+            self.set_driving(False)
+            self.set_avoid(False)
+            if self.lane_ready(now):
+                self.warming_up = False
+                # Red (ANSI), in a terminal and in the launcher's log.
+                self.get_logger().info(
+                    f'\033[31mwarmed up after {now - self.stage_since:.1f} s - '
+                    f'starting {self.stage}\033[0m')
+                # The stage's own clocks start now, not at launch.
+                self.stage_since = now
+        if not self.warming_up:
+            self.tick_stage(now)
         self.send_max_vel()
         # Every tick, like drive_enable: a control_lane restarted mid-run
         # picks it up, and any stage but tunnel_nav takes the wheel back.
@@ -1777,6 +1988,8 @@ class MissionControl(Node):
             self.tick_drive_to_tunnel(now)
         elif self.stage == STAGE_TUNNEL_NAV:
             self.tick_tunnel_nav(now)
+        elif self.stage == STAGE_TUNNEL_EXIT:
+            self.tick_tunnel_exit(now)
         else:
             self.tick_stopped()
 
@@ -1786,8 +1999,19 @@ class MissionControl(Node):
         self.set_follow_side(FOLLOW_AUTO) #v;ldk
         self.set_avoid(False)
         # ARX: start.min_lane_hz - before either way out of this stage.
-        if not self.lane_ready(now):
-            return
+        # ARX 2026-11-06: once only. Once detect_lane has been steady, a later
+        # gap does not hold the start: in 1106_0054 green came 10 s after the
+        # warm-up passed, gaps of 75-151 ms had begun by then, and the robot
+        # sat on a green light 8.8 s until start.give_up_s.
+        if not self.lane_was_ready:
+            if not self.lane_ready(now):
+                return
+            self.lane_was_ready = True
+        # ARX 2026-11-04: light.give_up_s runs from here, once detect_lane is
+        # steady, not from the start of the stage - the warm-up took 11 s in
+        # 1103_2344 and was eating into the wait for green.
+        if self.light_wait_from is None:
+            self.light_wait_from = now
         if not self.get_parameter('light.enabled').value:
             self.start('traffic light check disabled')
             return
@@ -1797,7 +2021,7 @@ class MissionControl(Node):
         if ready and self.green_frames >= need:
             self.start(f'green for {self.green_frames} frames')
             return
-        waited = now - self.stage_since
+        waited = now - self.light_wait_from
         if waited > self.get_parameter('light.give_up_s').value:
             # Never sit here past the give-up time. The clock has been
             # running since the light first went green, so a light we
@@ -3487,7 +3711,13 @@ class MissionControl(Node):
         detector alternates between up and nothing at close range and both of
         those mean the road is clear.
         """
-        if self.bar in wanted:
+        # ARX 2026-11-04: a DOWN frame since the last tick counts, not only
+        # the latest report. At the stop (0.27-0.30 m) detect_level flickers
+        # down / nothing frame to frame, and in 1104_0512 five ticks in a row
+        # happened to land on "nothing" - the robot left with the bar down.
+        down_since = (self.bar_down_at is not None and self.now() - self.bar_down_at
+                      <= 1.0 / self.get_parameter('rate_hz').value)
+        if self.bar in wanted and not (BAR_DOWN not in wanted and down_since):
             self.bar_ticks += 1
         else:
             self.bar_ticks = 0
@@ -3534,6 +3764,20 @@ class MissionControl(Node):
             self.bar_ticks = 0
         return self.bar_ticks
 
+    def cam_down_run(self, within_m):
+        """Ticks in a row with a DOWN frame within within_m lately (ARX).
+
+        The camera twin of range_run, on the same counter: a DOWN frame
+        inside level.camera.down_window_s counts, so a bar seen on every
+        other frame still adds up.
+        """
+        rng = self.cam_recent_range()
+        if rng is not None and rng <= within_m:
+            self.bar_ticks += 1
+        else:
+            self.bar_ticks = 0
+        return self.bar_ticks
+
     def tick_drive_to_level(self, now):
         """Carry on down the road until the crossing bar comes down (ARX).
 
@@ -3542,8 +3786,7 @@ class MissionControl(Node):
         the bar itself is the thing that has to be obeyed, and it is visible
         from 0.60 m which is further than the board is useful from.
         """
-        if (not self.get_parameter('level.enabled').value
-                or self.get_parameter('skip_level').value):
+        if not self.get_parameter('level.enabled').value:
             # finish_level goes on to the tunnel, or back to following the
             # road if that is switched off too. Ending in follow_side here
             # used to mean a skipped crossing skipped the tunnel as well.
@@ -3555,7 +3798,8 @@ class MissionControl(Node):
         self.set_follow_side(self.chosen_side())
         self.set_armed(MISSION_LEVEL)
 
-        need = self.get_parameter('level.confirm_ticks').value
+        need = self.get_parameter('level.both_confirm_ticks' if self.level_mode() == 'both'
+                                  else 'level.confirm_ticks').value
         slow_m = self.get_parameter('level.slow_m').value
         cam_slow_m = self.get_parameter('level.camera.slow_m').value
         if not self.heading_ok('level'):
@@ -3565,17 +3809,19 @@ class MissionControl(Node):
             self.bar_ticks = 0
         elif (self.range_run(lambda r: r < slow_m) if self.by_range()
               # Camera: DOWN, and near enough - camera.slow_m on its range.
-              else self.range_run(lambda r: self.bar == BAR_DOWN and r <= cam_slow_m, cam=True)
+              else self.cam_down_run(cam_slow_m)
               if self.level_mode() == 'camera'
               # ARX: both - the camera only says DOWN; the ultrasonic does
-              # the distances from here on.
-              else self.bar_run({BAR_DOWN})
+              # the distances from here on. Counted the flicker-tolerant way
+              # too (2026-11-04), at any range: was bar_run({BAR_DOWN}), the
+              # latest frame only, which never got 5 in a row at night.
+              else self.cam_down_run(math.inf)
               ) >= need:
             self.hold_heading_deg = self.yaw
             self.bar_ticks = 0
             self.us_near_seen = False
             self.stop_ticks = 0
-            seen = self.bar_range if self.by_range() else self.cam_range
+            seen = self.bar_range if self.by_range() else self.cam_recent_range()
             rng = 'unknown' if seen is None else f'{seen:.2f} m'
             where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
             self.get_logger().info(
@@ -3590,7 +3836,10 @@ class MissionControl(Node):
             self.get_logger().warn(
                 f'no crossing bar after {waited:.0f} s '
                 f'(last report {BAR_NAMES.get(self.bar, self.bar)}) - carrying on')
-            self.go(STAGE_FOLLOW_SIDE, 'gave up on the crossing')
+            # ARX 2026-11-04: on to the tunnel, as a lifted bar does. It went
+            # to follow_side, and a bar that was up all along left the robot
+            # following the lane round the course (1104_2243).
+            self.finish_level(f'no bar down in {waited:.0f} s')
 
     def tick_approach_bar(self, now):
         """Creep up to the bar and stop short of it (ARX).
@@ -3609,13 +3858,21 @@ class MissionControl(Node):
             self.set_avoid(False)
             self.set_follow_side(self.chosen_side())
             self.max_vel_want = self.get_parameter('level.approach_max_vel').value
+            if self.level_mode() == 'both':
+                # ARX 2026-11-05: lane speed until the ultrasonic is inside
+                # slow_m, slow from there - and slow with no range at all.
+                far = self.fresh_range()
+                if far is not None and far > self.get_parameter('level.slow_m').value:
+                    self.max_vel_want = None
         else:
             self.set_avoid(True, angular=self.hold_correction(),
                            linear=self.get_parameter('level.speed').value)
 
         gone = self.dist_from(self.lot_mark)
         mode = self.level_mode()
-        rng = self.cam_range if mode == 'camera' else self.fresh_range()
+        # Camera: the last DOWN frame's range, not the latest frame's - that
+        # is 9.9 on every frame the detector loses the bar (ARX 2026-11-04).
+        rng = self.cam_recent_range() if mode == 'camera' else self.fresh_range()
 
         # The bar lifting while the robot is still creeping is the ordinary
         # case in the simulator, where the plugin opens it at 0.30 m. It is
@@ -3652,13 +3909,17 @@ class MissionControl(Node):
                 f'stopping {rng:.2f} m short of the bar, after {gone:.2f} m')
             self.set_avoid(True, angular=0.0, linear=0.0)
             self.bar_ticks = 0
+            self.bar_down_frames = 0
+            self.bar_stop_by_cap = False
             if self.get_parameter('level.stop_at_bar').value:
                 self.stop('at the crossing bar - stopping here, as asked')
             else:
                 self.go(STAGE_WAIT_BAR, 'at the bar')
             return
 
-        if gone is not None and gone >= self.get_parameter('level.max_creep_m').value:
+        cap = self.get_parameter('level.both_max_creep_m' if mode == 'both'
+                                 else 'level.max_creep_m').value
+        if gone is not None and gone >= cap:
             # The range said to keep going for longer than the road has. Out
             # past about 0.50 m detect_level often resolves three of the four
             # bands and measures the span between the wrong two, so a reading
@@ -3669,6 +3930,10 @@ class MissionControl(Node):
                 f'(last {rng}) - standing here anyway')
             self.set_avoid(True, angular=0.0, linear=0.0)
             self.bar_ticks = 0
+            self.bar_down_frames = 0
+            # The ultrasonic never reached stop_m, so standing here its range
+            # says nothing about the bar: wait_bar decides on the camera.
+            self.bar_stop_by_cap = True
             self.go(STAGE_WAIT_BAR, 'ran out of creep')
 
     def tick_wait_bar(self, now):
@@ -3678,14 +3943,30 @@ class MissionControl(Node):
         self.set_avoid(True, angular=0.0, linear=0.0)
 
         need = self.get_parameter('level.clear_ticks').value
-        if self.level_mode() in ('ultrasonic', 'both'):
+        # ARX 2026-11-05: both, stopped by the creep cap rather than at
+        # stop_m - the bar may be past the ultrasonic's reach and a far range
+        # is not "lifted" (1104_2336 replayed: creep from 0.95 m, cap 0.60,
+        # standing at 0.35 > clear_m 0.30 with the bar down). The camera
+        # decides instead, as in camera mode.
+        by_camera = self.level_mode() == 'both' and self.bar_stop_by_cap
+        if self.level_mode() in ('ultrasonic', 'both') and not by_camera:
             # Standing at stop_m, the bar post and the road ahead read well
             # past clear_m; the bar itself reads under it. Down/up by the Pi's
             # own threshold is not used - at 0.45 it took the post for the bar.
             clear_m = self.get_parameter('level.clear_m').value
             run = self.range_run(lambda r: r > clear_m)
         else:
-            run = self.bar_run({BAR_UP, BAR_NONE})
+            # Lifted shows as "nothing", never "up" (every run to 1104_0512),
+            # so it is read as DOWN having stopped: no DOWN report for
+            # clear_quiet_s. Unless DOWN was hardly seen at the stop - in
+            # 1104_0512 the detector called a down bar "nothing" on 13 of 15
+            # frames and the robot left after 0.5 s - then wait longer.
+            g = self.get_parameter
+            sure = self.bar_down_frames >= g('level.down_frames_sure').value
+            quiet = g('level.clear_quiet_s').value if sure else g('level.clear_quiet_unsure_s').value
+            since = self.bar_down_at if self.bar_down_at is not None and \
+                self.bar_down_at >= self.stage_since else self.stage_since
+            run = need if self.bar in (BAR_UP, BAR_NONE) and now - since >= quiet else 0
         if run >= need:
             rng = self.fresh_range()
             self.finish_level(
@@ -3768,8 +4049,13 @@ class MissionControl(Node):
             if self.tunnel_sign_seen:
                 # Second condition: keep following the lane, slowly, until
                 # something is right in front.
-                self.max_vel_want = self.get_parameter('tunnel.after_sign_max_vel').value
                 near = self.get_parameter('tunnel.stop_ahead_m').value
+                # Slowed only once something is that close: with the heading
+                # standing in for the board (use_sign false) the board's
+                # moment comes ~0.5 m out, too far to crawl all of.
+                slow = self.get_parameter('tunnel.slow_ahead_m').value
+                if slow <= 0 or (self.front_range is not None and self.front_range <= slow):
+                    self.max_vel_want = self.get_parameter('tunnel.after_sign_max_vel').value
                 if self.front_range is not None and self.front_range <= near:
                     self.tunnel_ticks += 1
                     if self.tunnel_ticks >= self.get_parameter('tunnel.stop_ahead_ticks').value:
@@ -3869,11 +4155,19 @@ class MissionControl(Node):
 
     def map_xy(self):
         """The robot on the map as Nav2 sees it - latest map->base_footprint (ARX)."""
+        pose = self.map_pose()
+        return None if pose is None else pose[:2]
+
+    def map_pose(self):
+        """(x, y, yaw in degrees) on the map from TF, or None (ARX)."""
         try:
             t = self.tf_buffer.lookup_transform("map", "base_footprint", Time())
         except Exception:
             return None
-        return (t.transform.translation.x, t.transform.translation.y)
+        q = t.transform.rotation
+        yaw = math.degrees(math.atan2(2 * (q.w * q.z + q.x * q.y),
+                                      1 - 2 * (q.y * q.y + q.z * q.z)))
+        return (t.transform.translation.x, t.transform.translation.y, yaw)
 
     def send_initial_pose(self):
         """Tell AMCL the robot is at the front of the tunnel, on the map (ARX)."""
@@ -3911,7 +4205,7 @@ class MissionControl(Node):
         goal.pose.header.frame_id = 'map'
         goal.pose.header.stamp = self.get_clock().now().to_msg()
         goal.pose.pose.position.x = float(g('tunnel.nav.goal_x').value)
-        goal.pose.pose.position.y = float(g('tunnel.nav.goal_y').value)
+        goal.pose.pose.position.y = float(g('tunnel.nav.goal_y').value - self.nav_goal_drop)
         yaw = math.radians(g('tunnel.nav.goal_yaw_deg').value)
         goal.pose.pose.orientation.z = math.sin(yaw / 2.0)
         goal.pose.pose.orientation.w = math.cos(yaw / 2.0)
@@ -3941,7 +4235,10 @@ class MissionControl(Node):
         # A goal cancelled for a retry reports CANCELED after the next one
         # is out; only the goal in hand counts.
         if handle is self.nav_goal:
-            self.nav_result = future.result().status
+            res = future.result()
+            self.nav_error = (getattr(res.result, 'error_code', 0),
+                              getattr(res.result, 'error_msg', ''))
+            self.nav_result = res.status
 
     def tick_tunnel_nav(self, now):
         """Nav2 from the front of the tunnel to its exit, then stop (ARX).
@@ -3951,8 +4248,12 @@ class MissionControl(Node):
         there is nothing to wait for but AMCL taking the pose, about a scan.
         control_lane passes Nav2's commands to /cmd_vel while nav_want holds.
         """
-        self.set_driving(False)
-        self.set_avoid(False)
+        # One drive_enable per tick: on only while backing off (see 'backup'
+        # below), so control_lane is not flipped off and on within a tick.
+        backing = self.nav_phase == 'backup'
+        self.set_driving(backing)
+        if not backing:
+            self.set_avoid(False)
         self.set_armed(MISSION_NONE)
         self.nav_want = True
         g = self.get_parameter
@@ -3997,12 +4298,22 @@ class MissionControl(Node):
                     self.nav_pose_at = now
                 return
             self.nav_tries = 0
+            self.nav_goal_drop = 0.0
             self.send_nav_goal_fresh()
+            return
+
+        if self.nav_phase == 'replan':
+            # Held still (driving off, Nav2 has no goal) while the scans
+            # paint the cleared costmaps again.
+            if now - self.nav_replan_at >= g('tunnel.nav.replan_wait_s').value:
+                self.send_nav_goal_fresh(clear=False)
             return
 
         if self.nav_phase == 'backup':
             # nav_want is off for this, so control_lane takes the avoid
-            # command; straight back, the way the robot came in.
+            # command; straight back, the way the robot came in. Driving on
+            # for it, or hold_tick zeroes it between ticks (the -0.05 / 0
+            # saw-tooth in 1104_2225's back-offs). ARX 2026-11-04.
             self.nav_want = False
             speed = g('tunnel.nav.backup_speed').value
             if speed > 0 and now - self.nav_backup_at < g('tunnel.nav.backup_m').value / speed:
@@ -4026,25 +4337,136 @@ class MissionControl(Node):
                 self.send_nav_goal()
             return
 
+        arrive = g('tunnel.nav.arrive_m').value
+        xy = self.map_xy() if arrive > 0 and self.nav_result is None else None
+        if xy is not None:
+            gx = g('tunnel.nav.goal_x').value
+            gy = g('tunnel.nav.goal_y').value - self.nav_goal_drop
+            off = math.hypot(xy[0] - gx, xy[1] - gy)
+            if off <= arrive:
+                if self.nav_goal is not None:
+                    self.nav_goal.cancel_goal_async()
+                self.nav_goal = None
+                self.get_logger().info(
+                    f'within {off:.3f} m of the goal ({gx:.2f}, {gy:.2f}) by TF - taking it '
+                    f'as reached, Nav2 goal cancelled')
+                self.nav_result = GoalStatus.STATUS_SUCCEEDED
+
         if self.nav_result is not None:
             if self.nav_result == GoalStatus.STATUS_SUCCEEDED:
                 self.get_logger().info(
                     f'Nav2 reached the tunnel exit after {waited:.1f} s, '
                     f'{self.nav_tries} goal(s)')
-                if g('tunnel.nav.follow_lane_after').value:
+                if g('tunnel.exit.enabled').value:
+                    self.start_tunnel_exit()
+                elif g('tunnel.nav.follow_lane_after').value:
                     # nav_want is not set on the next tick, so control_lane
                     # takes the wheel back and steers by the lane again.
                     self.go(STAGE_FOLLOW_SIDE, 'out of the tunnel - back on the lane')
                 else:
                     self.stop('out of the tunnel')
             else:
-                self.nav_retry(now, f'status {self.nav_result}')
+                code, msg = self.nav_error
+                why = f'status {self.nav_result}, error {code}' + (f' "{msg}"' if msg else '')
+                # compute_path's error codes are 2xx; follow_path's (no
+                # progress, no valid control) are 1xx. A goal that drove a
+                # while before failing starts the in-a-row count again.
+                if now - self.nav_sent_at > 2.0:
+                    self.nav_plan_fails = 0
+                plan_failed = 200 <= code < 300
+                if plan_failed and self.nav_plan_fails < g('tunnel.nav.replan_tries').value:
+                    self.nav_replan(now, why)
+                elif (plan_failed and self.nav_goal_drop + 1e-6
+                        < g('tunnel.nav.fallback_max_m').value):
+                    self.nav_goal_drop = min(
+                        self.nav_goal_drop + g('tunnel.nav.fallback_step_m').value,
+                        g('tunnel.nav.fallback_max_m').value)
+                    self.nav_plan_fails = 0
+                    self.nav_replan(now, f'{why}; goal moved {self.nav_goal_drop:.2f} m down '
+                                         f'the doorway line')
+                else:
+                    self.nav_retry(now, why)
             return
 
         if now - self.nav_sent_at > g('tunnel.nav.attempt_s').value:
             if self.nav_goal is not None:
                 self.nav_goal.cancel_goal_async()
             self.nav_retry(now, f'still going after {now - self.nav_sent_at:.0f} s')
+
+    def start_tunnel_exit(self):
+        """Turn the exit's map heading into an odom one and drive out (ARX)."""
+        want = self.get_parameter('tunnel.exit.heading_deg').value
+        pose = self.map_pose()
+        if pose is None or self.yaw is None:
+            # No TF: the robot is facing the exit within the goal's yaw
+            # tolerance anyway, so straight on is near enough.
+            self.exit_heading = self.yaw
+            where = 'no map pose - holding the heading it has'
+        else:
+            self.exit_heading = self.yaw + (want - pose[2] + 180.0) % 360.0 - 180.0
+            where = (f'at ({pose[0]:.2f}, {pose[1]:.2f}) facing {pose[2]:+.1f} deg on '
+                     f'the map, {want:+.0f} is {self.exit_heading:+.1f} on odom')
+        self.exit_mark = self.pos
+        self.exit_on_line = False
+        self.go(STAGE_TUNNEL_EXIT, f'in front of the exit, {where} - straight out')
+
+    def tick_tunnel_exit(self, now):
+        """Drive straight out of the tunnel, then the lane or stop (ARX)."""
+        g = self.get_parameter
+        # Driving on, or control_lane's hold_tick publishes a zero between
+        # every command of ours (avoid_active already keeps the lane follower
+        # off). With False here 1104_2326 moved 0.04 m in 8 s.
+        self.set_driving(True)
+        self.set_armed(MISSION_NONE)
+        gone = self.dist_from(self.exit_mark) or 0.0
+        waited = now - self.stage_since
+        pose = self.map_pose()
+        past = pose is not None and pose[1] >= g('tunnel.exit.end_y').value
+        if (not past and gone < g('tunnel.exit.straight_m').value
+                and waited < g('tunnel.exit.max_s').value):
+            if pose is not None:
+                # ARX 2026-11-05: onto the doorway's centre line, not just its
+                # heading. Nav2 stops up to 0.13 m left of it (1.71-1.77 in
+                # five runs) and a held heading took the robot up that far
+                # left - into the left post (1104_2346, scraped in 1105_0735).
+                # Aim at the point on x = door_x lookahead_m ahead: off the
+                # line it points across towards it, on the line straight up.
+                v_max = g('tunnel.exit.speed').value
+                off_line = g('tunnel.exit.door_x').value - pose[0]
+                if (abs(off_line) <= g('tunnel.exit.on_line_m').value
+                        or pose[1] >= g('tunnel.exit.door_y').value):
+                    self.exit_on_line = True    # stays: no switching back
+                ahead = g('tunnel.exit.far_lookahead_m' if self.exit_on_line
+                          else 'tunnel.exit.lookahead_m').value
+                want = math.degrees(math.atan2(ahead, off_line))
+                err = (want - pose[2] + 180.0) % 360.0 - 180.0
+                w_max = g('tunnel.exit.max_angular').value
+                if abs(err) > g('tunnel.exit.spin_deg').value:
+                    # Far off: turn on the spot first (clear of the walls where
+                    # Nav2 stops), rather than arc a corner into a post.
+                    self.set_avoid(True, angular=math.copysign(w_max, err), linear=0.0)
+                    return
+                w = max(-w_max, min(w_max, g('tunnel.exit.kp').value * math.radians(err)))
+                scale = max(0.3, math.cos(math.radians(err)))
+                self.set_avoid(True, angular=w, linear=v_max * scale)
+                return
+            # No map pose: hold the exit heading on odom, as before.
+            err = 0.0 if self.exit_heading is None or self.yaw is None else abs(
+                (self.exit_heading - self.yaw + 180.0) % 360.0 - 180.0)
+            scale = max(0.3, math.cos(math.radians(min(err, 90.0))))
+            self.set_avoid(True, angular=self.correction_to(self.exit_heading),
+                           linear=g('tunnel.exit.speed').value * scale)
+            return
+        self.set_avoid(True, angular=0.0, linear=0.0)
+        self.set_avoid(False)
+        at = '' if pose is None else f', at ({pose[0]:.2f}, {pose[1]:.2f}) on the map'
+        why = f'{gone:.2f} m straight out in {waited:.1f} s{at}'
+        if not past and gone < g('tunnel.exit.straight_m').value:
+            self.get_logger().warn(f'tunnel exit: only {why} - blocked? going on anyway')
+        if g('tunnel.nav.follow_lane_after').value:
+            self.go(STAGE_FOLLOW_SIDE, f'out of the tunnel, {why} - back on the lane')
+        else:
+            self.stop(f'out of the tunnel, {why}')
 
     def clear_nav_costmaps(self):
         """Wipe both costmaps; the scan paints what is really there (ARX).
@@ -4072,9 +4494,23 @@ class MissionControl(Node):
             f'and trying again')
         self.nav_goal = None
         self.nav_result = None
+        self.nav_plan_fails = 0
         self.clear_nav_costmaps()
         self.nav_backup_at = now
         self.nav_phase = 'backup'
+
+    def nav_replan(self, now, why):
+        """The planner found no path: wait on cleared costmaps, re-send (ARX)."""
+        self.nav_plan_fails += 1
+        self.get_logger().warn(
+            f'Nav2 goal {self.nav_tries} found no path ({why}) - clearing the costmaps, '
+            f'waiting {self.get_parameter("tunnel.nav.replan_wait_s").value:.1f} s and '
+            f'trying again in place ({self.nav_plan_fails} in a row)')
+        self.nav_goal = None
+        self.nav_result = None
+        self.clear_nav_costmaps()
+        self.nav_replan_at = now
+        self.nav_phase = 'replan'
 
     def tick_stopped(self):
         self.set_armed(MISSION_NONE)

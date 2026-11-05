@@ -22,7 +22,7 @@ ros2 run rqt_reconfigure rqt_reconfigure
 
 
 
-
+misison 1
 
 
 ros2 run arx_mission detect_traffic_light --ros-args \
@@ -30,7 +30,15 @@ ros2 run arx_mission detect_traffic_light --ros-args \
   -p always_on:=true \
   -p is_calibration_mode:=true \
   -p use_sim_time:=false \
-  -r /detect/image_input:=/camera/image_compensated                 โชว์ จอ debug
+  -r /detect/image_input:=/camera/image_compensated                 
+  
+rqt โชว์ จอ debug
+
+ดูกรอบที่ /detec/image_output/compress
+/detec/image_output_sub1/compress
+/detec/image_output_sub2/compress
+/detec/image_output_sub3/compress
+
 
 ros2 run rqt_reconfigure rqt_reconfigure  ส่งตั้งจริง
 
@@ -136,6 +144,7 @@ pc
 ros2 topic echo /detect/level_range
 
 pi
+ros2 launch arx_ultrasonic_bringup ultrasonic.launch.py always_on:=true
 
 python3 ~/detect_level_ultrasonic.py --ros-args -p level.always_on:=true
 
@@ -158,3 +167,39 @@ ros2 launch turtlebot3_navigation2 navigation2.launch.py use_sim_time:=False \
 
 debug
 ros2 run rviz2 rviz2 -d ~/turtlebot3_ws/install/turtlebot3_navigation2/share/turtlebot3_navigation2/rviz/tb3_navigation2.rviz
+
+
+
+
+
+
+
+calibrate ล้อ
+
+
+pi
+
+ros2 launch turtlebot3_bringup robot.launch.py
+
+
+
+pc
+
+ros2 run turtlebot3_teleop teleop_keyboard
+
+cd ~/turtlebot3_ws/src/turtlebot3_autorace
+python3 calibrate_ui/odom_cal.py straight 2.000
+
+
+nano ~/turtlebot3_ws/src/turtlebot3/turtlebot3_bringup/param/burger.yaml
+      wheels:
+        separation: 0.160
+        radius: 0.0415       # 2026-11-03 วัดกับเทป 2 m ×3 (เดิม 0.0428, odom ยาวเกิน 3.2%)
+
+
+cd ~/turtlebot3_ws && colcon build --packages-select turtlebot3_bringup
+
+
+เช็ค
+
+grep -A2 "wheels:" ~/turtlebot3_ws/install/turtlebot3_bringup/share/turtlebot3_bringup/param/burger.yaml

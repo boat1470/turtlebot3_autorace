@@ -76,3 +76,14 @@
       # The narrow box on /detect/obstacle asks "can I carry on", which is the
       # construction zone's question. This one asks how far.
       front_angle_deg: 45.0
+
+      # /detect/obstacle_side, read once standing between the parking bays:
+      # returns within side_distance in side_angle_deg either side of straight
+      # left and straight right. 2 on 2026-11-04 (was 3, the default): the
+      # LiDAR's beam (~191 mm up on the 84 mm wheels) only clips the top of a
+      # parked Burger, and in 1104_0543 the taken bay gave 2-3
+      # points at 0.26-0.34 m against 8-13 in earlier runs - read as clear,
+      # and the robot backed into it. The empty bay gives 0 (nearest ~1.1 m).
+      side_angle_deg: 30.0
+      side_distance: 0.5
+      side_min_points: 2

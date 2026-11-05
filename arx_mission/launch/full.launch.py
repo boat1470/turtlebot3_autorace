@@ -36,8 +36,6 @@ Arguments:
                         camera one off. both: the camera's DOWN starts the
                         creep, the ultrasonic stops it and says lifted - start
                         the ultrasonic on the Pi as well
-    skip_level:=true    leave out the level crossing and go straight on to
-                        the tunnel
     nav:=false          no Nav2 - the tunnel mission stops at the front. On
                         by default on the robot (auto)
 
@@ -370,8 +368,10 @@ def stack(context, *unused_args, **unused_kwargs):
         include('arx_mission', 'mission_control.launch.py',
                 start_stage=preset['stage'],
                 spawn_yaw_deg=preset['yaw'],
-                skip_level=LaunchConfiguration('skip_level'),
                 level_source=level_source,
+                # ARX 2026-11-04: Nav2 takes ~13 s to come up and loads the
+                # CPU while it does; the warm-up waits it out (start.wait_nav).
+                wait_nav='true' if nav else 'false',
                 use_sim_time=use_sim_time),
         # Both detectors idle until mission_control arms them, so their
         # position in the order only has to be after the camera pipeline.
@@ -486,9 +486,5 @@ def generate_launch_description():
                               description='Start Nav2 for the tunnel: true, '
                                           'false, or auto - on without the '
                                           'simulator.'),
-        DeclareLaunchArgument('skip_level', default_value='false',
-                              description='Leave out the level crossing '
-                                          '(mission 5) and go straight on to '
-                                          'the tunnel.'),
     ]
     return LaunchDescription(args + [OpaqueFunction(function=stack)])

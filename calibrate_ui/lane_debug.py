@@ -254,6 +254,9 @@ RECORD_TOPICS = (
     # path it planned and whether collision_monitor was slowing it.
     '/arx/nav_active', '/arx/drive_enable', '/amcl_pose', '/plan',
     '/collision_monitor_state',
+    # Why a plan fails: the costmaps it planned on, and TF to replay the run
+    # in RViz with the robot where it was.
+    '/global_costmap/costmap', '/local_costmap/costmap', '/tf', '/tf_static',
 )
 
 

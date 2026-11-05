@@ -46,8 +46,8 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     start_stage = LaunchConfiguration('start_stage')
     spawn_yaw_deg = LaunchConfiguration('spawn_yaw_deg')
-    skip_level = LaunchConfiguration('skip_level')
     level_source = LaunchConfiguration('level_source')
+    wait_nav = LaunchConfiguration('wait_nav')
 
     args = [
         DeclareLaunchArgument(
@@ -70,16 +70,16 @@ def generate_launch_description():
                         'preset that faces anything but +x has to say so or '
                         'every heading gate is out by that much.'),
         DeclareLaunchArgument(
-            'skip_level', default_value='false',
-            description='Leave out the level crossing (mission 5) and go '
-                        'straight on to the tunnel.'),
-        DeclareLaunchArgument(
             'level_source', default_value='camera',
             description='What reads the crossing bar: ultrasonic (decide from '
                         '/detect/level_range against level.slow_m / stop_m / '
                         'clear_m), camera (decide from /detect/level_bar and '
                         '/detect/level_range_cam), or both (camera DOWN, then '
                         'the ultrasonic against stop_m / clear_m).'),
+        DeclareLaunchArgument(
+            'wait_nav', default_value='false',
+            description='Hold the warm-up until Nav2 is up (start.wait_nav). '
+                        'full.launch.py sets it whenever it starts Nav2.'),
     ]
 
     mission_control = Node(
@@ -99,8 +99,8 @@ def generate_launch_description():
             # person inherits it without knowing.
             {'start_stage': ParameterValue(start_stage, value_type=str)},
             {'spawn_yaw_deg': ParameterValue(spawn_yaw_deg, value_type=float)},
-            {'skip_level': ParameterValue(skip_level, value_type=bool)},
             {'level.source': ParameterValue(level_source, value_type=str)},
+            {'start.wait_nav': ParameterValue(wait_nav, value_type=bool)},
         ],
     )
 

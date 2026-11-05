@@ -73,6 +73,9 @@ import yaml
 
 HOST = 'iotcentral@192.168.0.101'
 
+# Terminal colour codes, as they arrive inside a node's log line.
+ANSI = re.compile(r'\x1b\[[0-9;]*m')
+
 # group, tag for the log, name, command
 COMMANDS = (
     ('pi', 'cam', 'camera',
@@ -93,9 +96,16 @@ COMMANDS = (
     # and extrinsic for /camera/image_compensated; left out of "start all".
     ('calibration', 'sign', 'detect_sign (always on)',
      'ros2 launch arx_mission detect_sign.launch.py always_on:=true'),
+    # The HC-SR04 measuring whatever mission is armed, to check it reads
+    # before a level_source both / ultrasonic run (lane_debug shows
+    # /detect/level_range). On the Pi - it is wired to the Pi's GPIO - but
+    # shown here, beside detect_sign. Not with "level ultrasonic" above:
+    # both would claim the same pins. 2026-11-05.
+    ('calibration-pi', 'sonarA', 'ultrasonic (always on)',
+     'ros2 launch arx_ultrasonic_bringup ultrasonic.launch.py always_on:=true'),
 )
 # Calibration jobs "start all" leaves alone - started by their own button.
-NOT_IN_START_ALL = ('sign',)
+NOT_IN_START_ALL = ('sign', 'sonarA')
 
 # The full stack on this PC, started at whichever of full.launch.py's presets
 # is picked. The list is read from the launch file, so a new preset shows up
@@ -103,7 +113,6 @@ NOT_IN_START_ALL = ('sign',)
 FULL_LAUNCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
                            'arx_mission', 'launch', 'full.launch.py')
 MISSION_CMD = 'ros2 launch arx_mission full.launch.py sim:=false start:={}'
-SKIP_LEVEL = ' skip_level:=true'
 # Where the launcher's output is kept, a file a day - see Window.save_line.
 RUNS_DIR = os.path.expanduser('~/runs')
 # What reads mission 5's bar - full.launch level_source, always passed.
@@ -381,14 +390,23 @@ class Window:
         import tkinter as tk
         from tkinter import ttk
         self.out = collections.deque()   # lines from the pump threads
-        self.jobs = [(group, (RemoteJob if group == 'pi' else Job)(tag, name, cmd, self.out))
+        # 'calibration-pi': listed with calibration, run on the Pi (ARX).
+        self.jobs = [(group, (RemoteJob if group in ('pi', 'calibration-pi') else Job)(
+                         tag, name, cmd, self.out))
                      for group, tag, name, cmd in commands]
-        self.calib = [j for g, j in self.jobs if g == 'calibration']
+        self.calib = [j for g, j in self.jobs if g in ('calibration', 'calibration-pi')]
+        pi = [j for g, j in self.jobs if g == 'pi']
         self.jobs = [j for _, j in self.jobs]
 
         root = self.root = tk.Tk()
         root.title('arx launcher')
         root.protocol('WM_DELETE_WINDOW', self.close)
+        # The controls above, the log below, with a sash between to drag the
+        # log taller or shorter (ARX 2026-11-05).
+        self.paned = tk.PanedWindow(root, orient='vertical', sashwidth=8,
+                                    sashrelief='raised', bd=0)
+        self.paned.pack(fill='both', expand=True)
+        top = ttk.Frame(self.paned)
 
         self.rows = []
         self.odom_label = None
@@ -398,9 +416,12 @@ class Window:
         self.reset_nag = False      # blink 'reset odom' from a mission stop to a reset
         self.blink = 0
 
+        boxes = []
+
         def group(title, jobs):
-            box = ttk.LabelFrame(root, text=title, padding=8)
-            box.pack(fill='x', padx=8, pady=(8, 0))
+            # Packed below in BOX_ORDER, not in the order they are built.
+            box = ttk.LabelFrame(top, text=title, padding=8)
+            boxes.append(box)
             return box
 
         def row(box, i, job):
@@ -416,7 +437,6 @@ class Window:
                       ).grid(row=i, column=4, padx=8, sticky='w')
             self.rows.append((job, b, s, led))
 
-        pi = [j for j in self.jobs if isinstance(j, RemoteJob)]
         if pi:
             box = group(f'Pi  ({RemoteJob.host})', pi)
             for i, job in enumerate(pi):
@@ -488,7 +508,6 @@ class Window:
         # calibration group first - two of each fight over the same topics.
         names = presets()
         self.preset = tk.StringVar(value='full' if 'full' in names else names[0])
-        self.skip_level = tk.BooleanVar(value=False)
         self.level_source = tk.StringVar(value='camera')
         self.lane_masks = tk.BooleanVar(value=False)
         self.mission = Job('run', 'full.launch', self.mission_command(), self.out)
@@ -512,36 +531,45 @@ class Window:
         self.mission_cmd = ttk.Label(box, text=self.mission.shown, foreground='#777')
         self.mission_cmd.grid(row=1, column=4, padx=8, sticky='w')
         self.preset.trace_add('write', lambda *a: self.pick_preset())
-        tk.Checkbutton(box, text='skip mission 5 (level crossing) - straight on to the tunnel',
-                       variable=self.skip_level,
-                       command=self.pick_preset).grid(row=2, column=0, columnspan=5, sticky='w')
+        # 'skip mission 5' taken out 2026-11-05 - left ticked, it ran
+        # 1105_0727 past the bar without looking. skip_level is gone from
+        # full.launch too; level.enabled false in mission.yaml remains.
         level = tk.Frame(box)
-        level.grid(row=3, column=0, columnspan=5, sticky='w')
+        level.grid(row=2, column=0, columnspan=5, sticky='w')
         tk.Label(level, text='mission 5 bar by:').pack(side='left')
         for value, text in LEVEL_SOURCES:
             tk.Radiobutton(level, text=text, value=value, variable=self.level_source,
                            command=self.pick_preset).pack(side='left')
         tk.Checkbutton(box, text='lane masks (debug_image) - white and yellow mask images',
                        variable=self.lane_masks,
-                       command=self.pick_preset).grid(row=4, column=0, columnspan=5, sticky='w')
+                       command=self.pick_preset).grid(row=3, column=0, columnspan=5, sticky='w')
         self.rows.append((self.mission, None, st, led))
         self.mission_pending = False
         self.paint_mission_button()
 
-        bar = ttk.Frame(root, padding=(8, 6, 8, 4))
+        # Top to bottom (ARX 2026-11-05): Pi, mission, calibration, sign board.
+        order = ('Pi', 'mission', 'calibration', 'sign board')
+        boxes.sort(key=lambda b: next((i for i, t in enumerate(order)
+                                       if b.cget('text').startswith(t)), len(order)))
+        for b in boxes:
+            b.pack(fill='x', padx=8, pady=(8, 0))
+
+        bar = ttk.Frame(top, padding=(8, 6, 8, 4))
         bar.pack(fill='x')
         ttk.Button(bar, text='Stop everything', command=self.stop_all).pack(side='left')
         ttk.Button(bar, text='Clear output',
                    command=lambda: self.log.delete('1.0', 'end')).pack(side='left', padx=6)
 
-        frame = ttk.Frame(root, padding=(8, 0, 8, 8))
-        frame.pack(fill='both', expand=True)
+        frame = ttk.Frame(self.paned, padding=(8, 0, 8, 8))
         self.log = tk.Text(frame, height=18, width=110, bg='#111', fg='#ddd',
                            insertbackground='#ddd', font=('TkFixedFont', 9), wrap='none')
         scroll = ttk.Scrollbar(frame, command=self.log.yview)
         self.log.configure(yscrollcommand=scroll.set)
+        self.log.tag_configure('red', foreground='#ff5555')
         self.log.pack(side='left', fill='both', expand=True)
         scroll.pack(side='right', fill='y')
+        self.paned.add(top, stretch='never', minsize=60)
+        self.paned.add(frame, stretch='always', minsize=60)
 
         root.after(100, self.tick)
 
@@ -563,8 +591,6 @@ class Window:
     def mission_command(self):
         """full.launch for the chosen preset, with the checkboxes' arguments on the end."""
         cmd = MISSION_CMD.format(self.preset.get())
-        if self.skip_level.get():
-            cmd += SKIP_LEVEL
         cmd += f' level_source:={self.level_source.get()}'
         if self.lane_masks.get():
             cmd += LANE_MASKS
@@ -586,7 +612,10 @@ class Window:
             self.reset_nag = True
             return
         self.reset_nag = False
-        busy = [j for j in self.calib if j.running()]
+        # The Pi's always-on ultrasonic stays up: it is not part of the
+        # camera pipeline full.launch starts again, and a run in
+        # level_source both wants it (ARX 2026-11-05).
+        busy = [j for j in self.calib if j.running() and not isinstance(j, RemoteJob)]
         for job in busy:
             job.stop()
         self.pick_preset()
@@ -744,7 +773,8 @@ class Window:
             job.stop()
 
     def tick(self):
-        if self.mission_pending and not any(j.running() for j in self.calib):
+        if self.mission_pending and not any(j.running() for j in self.calib
+                                            if not isinstance(j, RemoteJob)):
             self.mission_pending = False
             self.start_mission()
         self.tick_sign()
@@ -760,7 +790,12 @@ class Window:
             at_end = self.log.yview()[1] > 0.999
             while self.out:
                 line = self.out.popleft()
-                self.log.insert('end', line + '\n')
+                # ANSI colour codes come through as text ([34m from Nav2's
+                # lifecycle lines); they are dropped, and a line a node marked
+                # red (\033[31m) is shown red.
+                red = '\x1b[31m' in line or '\x1b[91m' in line
+                line = ANSI.sub('', line)
+                self.log.insert('end', line + '\n', ('red',) if red else ())
                 self.save_line(line)
             extra = int(self.log.index('end-1c').split('.')[0]) - LOG_LINES
             if extra > 0:

@@ -43,7 +43,14 @@ amcl:
     save_pose_rate: 0.5
     sigma_hit: 0.2
     tf_broadcast: true
-    transform_tolerance: 1.0   # WRG: was 0.5 — tighter, trust TF
+    # ARX 2026-11-06: 0.3 (was 1.0, = WRG). AMCL stamps map->odom this far
+    # in the future, so after the initial pose at the tunnel front a TF
+    # lookup at the latest time still used the old map->odom until odom's
+    # stamps caught up: TF had the new pose 1.2 s after the pose was sent
+    # in 1106_0238 (AMCL took it in 0.1 s), and the robot stood still that
+    # long. Nav2's own lookups wait the same way. Scans come about every
+    # 0.1 s, so 0.3 still covers a late one.
+    transform_tolerance: 0.3
     update_min_a: 0.1          # WRG: was 0.2 — update particle ถี่ขึ้น
     update_min_d: 0.1          # WRG: was 0.25 — update particle ถี่ขึ้น
     z_hit: 0.5
@@ -75,6 +82,14 @@ bt_navigator:
     # ARX: was navigate_to_pose_w_replanning_and_recovery.xml. No recoveries - spinning or
     # backing up between the tunnel walls makes things worse - and no replanning every
     # second, which can swap a path through the gap for one that is not.
+    # 2026-11-04: replanning every second again (navigate_w_replanning_time.xml, 1 Hz,
+    # no recoveries) - the obstacles inside are re-laid on the day, and the path has to
+    # follow what the scan shows. Was ..._only_if_path_becomes_invalid.xml.
+    # 2026-11-04 later: back to ..._only_if_path_becomes_invalid.xml. In 1104_2209 the 1 Hz
+    # replan gave 21 paths in 22 s, each a different shape (one 4.07 m round the other
+    # side), and the robot turned after each. This one still checks the path once a
+    # second against the global costmap (obstacle_layer sees the boxes) and replans only
+    # when a box lies on it. Back to navigate_w_replanning_time.xml if it drives into one.
     default_nav_to_pose_bt_xml: "$(find-pkg-share nav2_bt_navigator)/behavior_trees/navigate_w_replanning_only_if_path_becomes_invalid.xml"
     default_nav_through_poses_bt_xml: "$(find-pkg-share nav2_bt_navigator)/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml"
     always_reload_bt_xml: false
@@ -138,10 +153,31 @@ controller_server:
     goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.10          # WRG: 5cm — drop ในเส้นแดงแม่น (was 0.10, Super Bingo priority)
-      yaw_goal_tolerance: 3.14         # ARX: was 0.26 - any heading at the exit; lane following
-                                       # takes over from there, so turning to a heading first
-                                       # only costs time
+      xy_goal_tolerance: 0.10          # = WRG. ARX 2026-11-06: tried 0.05 (goal_y 1.50) the same
+                                       # day - in 1106_0253 and 0300 RPP was 1-3 cm from the goal
+                                       # and turned on the spot there for 6 s while the goal
+                                       # checker never took it, until "Failed to make progress"
+                                       # (~9 s lost; a fresh goal was taken at once). Likely the
+                                       # checker moves the path's end into odom with map->odom
+                                       # from when the path was planned, and AMCL had shifted
+                                       # since by more than 5 cm. Nearer the exit is done by
+                                       # mission.yaml goal_y 1.55 instead.
+      yaw_goal_tolerance: 3.14         # ARX 2026-11-06: 3.14 again, the same day it went to
+                                       # 0.26 (15 deg). In 1106_0253 RPP reached the goal at
+                                       # 17.3 s, then swung 108 -> 53 -> 105 -> 56 -> 100 deg
+                                       # round 80 for 6 s, never accepted, until "Failed to make
+                                       # progress" - ~9 s lost. tunnel_exit turns to the doorway
+                                       # instead (0.6 rad/s, stops within spin_deg).
+                                       # Before: 10 deg, 2026-11-04 (was 3.14, any heading - the
+                                       # exit came out at 77 deg against the lane's 90 in
+                                       # 1104_0543). RPP turns on the spot to it at the goal.
+                                       # 3.14 again later on 2026-11-04: the goal is now just in
+                                       # front of the exit (1.85, 1.45) beside the right wall,
+                                       # 0.099 m from the centre, and a turn on the spot sweeps
+                                       # the corners out to 0.113 m - into it. mission_control's
+                                       # tunnel_exit steers onto 90 deg while driving out.
+                                       # Since then max_angular_accel 6.0 stopped RPP's turn
+                                       # running away (2026-11-06).
     FollowPath:
       # ══════════════════════════════════════════════════════════════════
       # WRG 2026: Regulated Pure Pursuit — deterministic path following,
@@ -166,8 +202,18 @@ controller_server:
       # ── Heading rotation (critical for AprilTag) ──
       use_rotate_to_heading: true
       rotate_to_heading_min_angle: 1.0    # 45° — rotate in place if path heading >45° off
-      rotate_to_heading_angular_vel: 2.0    # match Burger safe angular
-      max_angular_accel: 1.8
+      # ARX 2026-11-04: was 2.0. OpenCR turns ~1.2x the command, so 2.0 was ~2.4 rad/s and
+      # at 10 Hz each tick moved ~14 deg: in 1104_2209 it turned on the spot 4 times
+      # (+90, -27, +95, -95 deg) and overshot to 155 deg, and in 0628 it overshot the
+      # goal heading back and forth. Slower lands on the heading.
+      rotate_to_heading_angular_vel: 0.8
+      # ARX 2026-11-06: was 1.8. rotateToHeading clamps its 0.8 rad/s to the
+      # odom's angular speed +- max_angular_accel x 0.1 s. The OpenCR turns
+      # ~1.2x what it is told, so once the command passed ~0.9 the window
+      # rose each tick faster than RPP could bring it down - a runaway to
+      # the smoother's 2.0 (1104_2342, 1106_0054, 1106_0103), and the wheels
+      # slipped 11-16% spinning that fast. +-0.6 a tick holds 0.8.
+      max_angular_accel: 6.0
 
       # ── Regulation: auto-slow at curves + near obstacles ──
       use_regulated_linear_velocity_scaling: true
@@ -335,7 +381,11 @@ global_costmap:
       # ARX: was 0.1. Half the Burger's 0.178 m across the wheels - the planner treats
       # anything nearer a wall than this as impassable, so 0.1 left 0.10 m of a 0.30 m gap
       # and 0.09 leaves 0.12 m. Smaller than this and it plans the wheels into the wall.
-      robot_radius: 0.09
+      # 0.08 on 2026-11-04 (was 0.09): in 1104_0616 the robot reached
+      # (0.33, -0.13) in the mouth, nearer the wall than 0.09, and the replan
+      # from there failed ("Failed to create plan") - goal 1 aborted, and only
+      # the back-off and retry got it through. Back to 0.09 if a wheel clips.
+      robot_radius: 0.08
       resolution: 0.025                # ARX: was 0.05 - finer than the 0.05 map on purpose: the
                                        # static layer resamples it, and the gap no longer rounds
                                        # shut
@@ -347,7 +397,11 @@ global_costmap:
       # The planner plans on the map alone now; live obstacles are the local costmap's job
       # (rolling, in odom, so it never depends on AMCL). The obstacle/voxel blocks below are
       # left as they were, unused.
-      plugins: ["static_layer", "inflation_layer"]
+      # 2026-11-04: obstacle_layer back in. The tunnel's obstacles are re-laid on the day
+      # (ROBOTIS), so the planner has to see them - RPP only follows the path it is given.
+      # The wrong-place painting above is cleared now: mission_control clears both
+      # costmaps once AMCL has the pose at the front, and again before every retry.
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -413,11 +467,32 @@ planner_server:
       # plugin: "nav2_straightline_planner::StraightLine"   # WRG: was nav2_navfn_planner::NavfnPlanner
       # interpolation_resolution: 0.1                        # 10cm between interpolated points
       # NOTE: StraightLine ignores costmap. Waypoints must be outside walls/inflation.
-      # Fallback (Nav2 default NavFn planner):
-      plugin: "nav2_navfn_planner::NavfnPlanner"
+      # ARX 2026-11-06: Smac 2D in place of NavFn. NavFn's paths hug the
+      # obstacles (RPP corrects round them) and failed to plan through the
+      # entrance gap at (0.63, -0.03) in 2306, 0037_2 and 0115.
+      # cost_travel_multiplier weighs the inflation cost, so the path keeps
+      # to the middle of a gap; too high and a narrow gap stops planning.
+      # To go back, swap in the NavFn block below.
+      plugin: "nav2_smac_planner::SmacPlanner2D"
       tolerance: 0.1
-      use_astar: false
+      downsample_costmap: false
+      downsampling_factor: 1
       allow_unknown: false
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      max_planning_time: 1.0
+      cost_travel_multiplier: 2.0
+      use_final_approach_orientation: false
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
+      # NavFn, used 2026-10-18 to 2026-11-06:
+      # plugin: "nav2_navfn_planner::NavfnPlanner"
+      # tolerance: 0.1
+      # use_astar: false
+      # allow_unknown: false
 
 behavior_server:
   ros__parameters:
@@ -569,8 +644,11 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.21, 0.0, 2.0]    # ARX: was [0.5, 0.0, 2.5] - the real Burger does not move
-    min_velocity: [-0.21, 0.0, -2.0]  # at 0.22 m/s (OpenCR refuses it); nothing goes above 0.21
+    max_velocity: [0.21, 0.0, 1.2]    # ARX: was [0.5, 0.0, 2.5] - the real Burger does not move
+    min_velocity: [-0.21, 0.0, -1.2]  # at 0.22 m/s (OpenCR refuses it); nothing goes above 0.21
+                                      # ARX 2026-11-06: w 2.0 -> 1.2 (real ~1.44). Spinning at
+                                      # 2 rad/s the wheels slipped 14-16% (IMU vs wheel rate,
+                                      # 1106_0103) and odom x/y drifted with it.
     deadband_velocity: [0.0, 0.0, 0.0]
     velocity_timeout: 1.0
     # ARX: was [2.5, 0, 3.2] / [-2.5, 0, -3.2]. RPP drops to

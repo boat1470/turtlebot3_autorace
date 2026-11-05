@@ -16,3 +16,10 @@ notes/
 arx_mission/image_sim/*
 arx_mission/image/*
 arx_mission/images_print/*
+vel_full_*
+.gitignore
+curve1A_*
+start_to_*
+firstcurve_*
+
+/debug/*

@@ -20,6 +20,9 @@
       # stream's longest gap is 50-69 ms; replayed on seven runs, 70 waits
       # at most ~11 s from the first lane message.
       lane_hz_hold_s: 3.0
+      # Beep on the OpenCR when the warm-up above is over (turtlebot3_node's
+      # /sound): 0 none, 1 on, 2 low battery, 3 error, 4/5 button. 2026-11-04.
+      sound: 3
       max_lane_gap_ms: 70.0
       give_up_s: 30.0
 
@@ -38,6 +41,8 @@
       # The official clock starts at the first green whether or not the robot
       # moves, so a light that cannot be seen must still end in driving off.
       # Missing this mission costs 20 points; never starting costs the run.
+      # Counted from detect_lane being steady (the start.* warm-up above),
+      # not from the launch - 2026-11-04.
       give_up_s: 25.0
 
     intersection:
@@ -1044,9 +1049,8 @@
       # ARX: on. What reads the bar is not set here - level.source comes from
       # full.launch level_source (launcher: "mission 5 bar by"), which wins
       # over this file. Camera by default since 2026-10-25; ultrasonic and
-      # both need "level ultrasonic" started on the Pi. skip_level:=true
-      # (launcher: "skip mission 5") leaves it out for one run; false here
-      # leaves it out for good.
+      # both need "level ultrasonic" started on the Pi. false here leaves the
+      # crossing out (skip_level:=true, its one-run switch, removed 2026-11-05).
       enabled: true
 
       # Only take "bar down" while facing the road the crossing is on. The
@@ -1063,6 +1067,13 @@
         center_deg: 0.0
         tolerance_deg: 15.0
 
+      # Seconds in drive_to_level with no bar down before going on to the
+      # tunnel anyway - the bar may be up when the robot gets there.
+      # 2026-11-04: 20 (was the code's 90, which then went to follow_side and
+      # never to the tunnel - 1104_2243 drove past a raised bar and round the
+      # course). The bar is normally confirmed 13-14 s into this stage.
+      give_up_s: 20.0
+
       # 2026-10-18: with the ultrasonic (level.source, set by full.launch
       # level_source) the Pi only sends the range, /detect/level_range, and
       # each stage here has its own threshold on it:
@@ -1074,12 +1085,20 @@
       # Before, one down_m on the Pi did all three, and at 0.45 the bar post
       # beside the robot kept reading "down" after the bar had lifted.
       slow_m: 0.45
-      clear_m: 0.20
+      # 0.30 on 2026-11-05 (was 0.20): stop_m went to 0.18, and standing
+      # there a range wobbling past 0.20 for 5 ticks would read as lifted.
+      clear_m: 0.30
       # level_source:=camera (2026-10-20): creep once the camera sees DOWN at
       # or inside camera.slow_m, stop at camera.stop_m, go on once it reads
       # UP or loses the bar (clear_ticks). Its range is k_px_m / band span -
       # an estimate; it goes blind under ~0.20 m, and blind counts as lifted.
       camera:
+        # 2026-11-04: a tick counts as the bar DOWN if any frame in the last
+        # down_window_s was, with its range (frames without the bar read 9.9).
+        # At night detect_level saw DOWN on every other frame (1104_2236,
+        # 1104_2310) and the latest-frame check never got 5 ticks in a row.
+        # Used by level_source both as well (its DOWN, at any range).
+        down_window_s: 0.3
         # 0.70 on 2026-10-20 (was 0.40): the run at 01:05 saw DOWN at
         # 0.59-0.66 m and only got under 0.40 at 0.16, already past the stop.
         slow_m: 0.70
@@ -1098,6 +1117,13 @@
       # because a false start drives into the bar.
       # 2026-10-18: 5 (was 3) - the ultrasonic's range wobbles near the bar.
       confirm_ticks: 5
+      # level_source both only (2026-11-04): ticks of the camera's DOWN before
+      # creeping - the ultrasonic does the distances after. Replayed on
+      # tonight's runs: 2 starts the creep at 0.47-0.73 m (5: 0.29-0.51). A
+      # single stray DOWN frame lasts 3 ticks in the 0.3 s window, so 2 also
+      # creeps on one: 1104_2243 (bar up) would have at 0.83 m, and crept
+      # max_creep_m before the ultrasonic let it go.
+      both_confirm_ticks: 2
 
       # Leaving is decided on "anything other than down", not on "up".
       # detect_level alternates between up and nothing at close range -
@@ -1105,6 +1131,15 @@
       # mean the road is clear. Waiting for a run of UP alone stalls on that
       # flicker.
       clear_ticks: 5
+      # Camera only, 2026-11-04: a lifted bar reads "nothing" (never "up"),
+      # so lifted is no DOWN report for clear_quiet_s. If DOWN came fewer
+      # than down_frames_sure times while waiting, the detector is not
+      # reading this bar well from here - 1104_0512 said "nothing" for 13 of
+      # 15 frames of a down bar at 0.29 m and left after 0.5 s - so wait
+      # clear_quiet_unsure_s instead. A normal wait has ~120 DOWN reports.
+      clear_quiet_s: 0.5
+      clear_quiet_unsure_s: 3.0
+      down_frames_sure: 15
 
       # Where to stand. Nearer than 0.20 m the camera has nothing to look at:
       # it sits 0.076 m ahead of the model origin, which is itself 0.038 m
@@ -1116,7 +1151,8 @@
       # from the sensor's face and is good down to a few cm. Back to 0.30 if
       # level_source is ever the camera again, which goes blind under 0.20.
       # The ultrasonic's stop. The camera has its own, camera.stop_m above.
-      stop_m: 0.10
+      # 0.18 on 2026-11-05 (was 0.10), for level_source both / ultrasonic.
+      stop_m: 0.18
       # ...for this many ticks in a row (ultrasonic and both; the camera
       # stops on one). 3 on 2026-10-24: run 1024_2321 stopped on a single
       # stray 0.08 with the bar still ~0.30 m away.
@@ -1136,12 +1172,20 @@
       # and 0.81 m for that reason. The range is what aims; this is what
       # stops a bad one running the robot into the bar.
       max_creep_m: 0.60
+      # level_source both (2026-11-05): the camera may start the approach from
+      # ~0.95 m (both_confirm_ticks 2), so the cap is 1.0. Lane speed until
+      # the ultrasonic reads inside slow_m, approach_max_vel from there (and
+      # with no ultrasonic range). Stopped by this cap instead of stop_m,
+      # wait_bar goes on the camera, not on the range.
+      both_max_creep_m: 1.0
 
       # Stop on arriving at the bar instead of waiting for it. For checking
       # the approach on its own.
       stop_at_bar: false
 
-      give_up_s: 90.0
+      # give_up_s: set near the top of this block (20, 2026-11-04). A second
+      # one here (90) overrode it - yaml keeps the last - and 1104_2310 waited
+      # 49 s without going on to the tunnel.
 
       # Under thirty seconds, deliberately: the rules end a run when the robot
       # has not moved for that long, so a bar that never lifts has to be given
@@ -1200,6 +1244,18 @@
         enabled: true
         center_deg: -90.0
         tolerance_deg: 30.0
+      # And only inside this box on /odom (metres from the start line, the
+      # frame a full run's odom is in). 2026-11-03: the heading alone also
+      # holds on the run down past 14A and 11A, at x -1.1, y 2.9 -> 2.15; the
+      # tunnel approach is x -2.58, y 2.4 -> 1.75, the board first seen at
+      # y 1.76-1.86 (runs 1102_0034 to 1103_2344, right and left). Re-check
+      # on the venue's course. Presets start odom elsewhere and skip it.
+      zone:
+        enabled: true
+        x_min: -3.2
+        x_max: -2.0
+        y_min: 1.0
+        y_max: 3.0
 
       # Reports of the board needed inside vote_max_age_s.
       # 2 on 2026-11-03 (was 3). The board only counts from min_width_px
@@ -1218,13 +1274,19 @@
       # true: the tunnel board is looked for. false: facing within
       # tunnel.heading (-90 +/- 30) for heading_hold_s stands in for it, then
       # the stop at stop_ahead_m - for the practice room, which has no board.
-      use_sign: true
+      # 2026-11-03: false - the board counted twice at best before leaving
+      # the frame, and not at all in 1103_2344; the heading inside
+      # tunnel.zone for heading_hold_s stands in for it.
+      use_sign: false
       heading_hold_s: 1.0
       stop_ahead_m: 0.25
       stop_ahead_ticks: 2
       # Speed ceiling from the board to the stop, so a 0.15 m stop is not
       # overshot between scans.
       after_sign_max_vel: 0.08
+      # ...but only from this close on /detect/front_range (0 = from the
+      # board on, as before). 2026-11-03, for use_sign false.
+      slow_ahead_m: 0.30
 
       # From the front of the tunnel to its exit on Nav2 (map/tunnel.yaml,
       # param/nav2.yaml), then stop. Needs full.launch nav:=true - the
@@ -1233,6 +1295,10 @@
         # false on 2026-10-25: stop at the tunnel front (LiDAR <= stop_ahead_m
         # after the sign) instead of handing over to Nav2.
         # true again on 2026-11-03, to drive mission 6 through the tunnel.
+        # false 2026-11-04 to map the tunnel from the stop at its front -
+        # cartographer started there makes it the map's origin, start_x/y/yaw
+        # 0, 0, 0 below. True again the same day on the new map
+        # (tunnel_gimp.pgm); goal_x/y are still the old map's, to re-measure.
         enabled: true
         # Where the front is on the tunnel map, and which way the robot faces
         # there - map frame. Read off RViz 2026-10-17.
@@ -1244,9 +1310,36 @@
         start_odom_yaw_deg: -90.0
         # The exit. 2026-10-17: was (1.8, 1.5), 0.175 m from a wall; this is
         # 0.32 m clear.
+        # 2026-11-04: (1.85, 1.45), in front of the exit rather than past it
+        # (was 1.85, 1.90). The doorway on tunnel_gimp.pgm is x 1.749-1.949
+        # (cell edges; middle 1.849) at y 1.55-1.70, with the right wall
+        # running down to y 1.30; Nav2 took it on a slant and hit a post
+        # (1104_2256). From here tunnel.exit below drives straight up through it.
+        # y 1.45 not 1.30 (user, same day): nearer the doorway, less room for
+        # an obstacle in between. Was no turn on the spot there (nav2.yaml
+        # yaw_goal_tolerance 3.14) - the right wall is close. 2026-11-06:
+        # 0.26 (user), so Nav2 stops facing the exit within 15 deg - and
+        # back to 3.14 the same day: RPP swung +-25 deg round it for 6 s in
+        # 1106_0253. tunnel_exit does the turn. goal_yaw_deg below only
+        # matters again if the tolerance is tightened.
         goal_x: 1.85
-        goal_y: 1.90
-        goal_yaw_deg: 0.0
+        # 2026-11-06 (user: stop nearer the exit). Nav2 counts as arrived
+        # xy_goal_tolerance (0.10) short of it: y 1.33-1.36 for 1.45 in
+        # 1106_0115, 0236, 0238. 1.50 with a tolerance of 0.05 stopped at
+        # 1.46 but RPP stood turning at the goal for 6 s in 0253 and 0300
+        # (the goal checker never took it), so 1.55 - the doorway's mouth,
+        # 0.10 from both posts - with 0.10 again: stops about y 1.45.
+        # 1.55 failed: in 1106_0311 Smac found no path to it 48 times (the
+        # scan paints the posts into it), 99.6 s and 60 goals in the
+        # tunnel. 1.50 planned every time in 0253 / 0300: stops about 1.40.
+        goal_y: 1.50
+        # 90 on 2026-11-04 (was 0, never enforced - nav2.yaml's
+        # yaw_goal_tolerance was 3.14): the way out of the tunnel runs up the
+        # map, and 1104_0543 stopped at 77 deg, still turning.
+        # 80 on 2026-11-06 (user, was 90): the robot hits the left post
+        # (x 1.749) often - stop turned 10 deg to the right (+x), away from
+        # it. With yaw_goal_tolerance 0.26 Nav2 stops at 65-95 deg.
+        goal_yaw_deg: 80.0
         start_sigma_m: 0.10
         start_sigma_deg: 10.0
         # Wait for AMCL to report the robot within localise_tol_m of the
@@ -1261,12 +1354,72 @@
         # 0 never stops (was 60, and a failed goal stopped at once).
         give_up_s: 0.0
         attempt_s: 40.0
-        backup_m: 0.05
+        backup_m: 0.10      # 0.10 on 2026-11-04 (was 0.05): in 1104_0759 goals 3 and 4 failed 1 s apart - 5 cm back was not out of the obstacle's lethal zone
         backup_speed: 0.05
+        # 2026-11-06: no path from the planner (error 2xx) is not backed off:
+        # clear the costmaps, hold replan_wait_s, send again in place. After
+        # replan_tries of those in a row, back off once anyway (the robot may
+        # sit in an obstacle's lethal zone, 1104_0759). 1106_0238 lost ~8 s
+        # to four back-offs while the gap by the right wall was painted shut.
+        replan_wait_s: 0.5
+        replan_tries: 4
+        # 2026-11-06: after replan_tries no-path in a row, move the goal down
+        # the doorway line by fallback_step_m (up to fallback_max_m below
+        # goal_y) instead of backing off; back off only once that is used up.
+        # 1106_0311: goal at 1.55 unplannable 48 times, 99.6 s in the tunnel.
+        fallback_step_m: 0.05
+        fallback_max_m: 0.15
+        # 2026-11-06: within arrive_m of the goal by TF (latest map pose)
+        # counts as reached - mission_control cancels Nav2 and starts
+        # tunnel.exit. Nav2's own goal checker sometimes disagreed with RPP
+        # and RPP turned on the spot at the goal for 3.6-9 s (0253, 0300,
+        # 0331). 0 leaves it to Nav2.
+        arrive_m: 0.10
         # At the exit, follow the lane on (true) or stop. Nav2 not arriving
         # is retried (above), never handed back to the lane mid-tunnel.
         # 2026-10-18: stop - the run ends at the tunnel exit.
-        follow_lane_after: false
+        # 2026-11-04: true tried for the lane from the exit (goal_yaw_deg 90
+        # faces it) - back to false for now, stop at the exit.
+        # 2026-11-04 later: true again - the exit came out facing the lane
+        # (1104_2225 ends at 85 deg) with yaw_goal_tolerance 0.17.
+        follow_lane_after: true
+
+      # 2026-11-04: the second step of the way out - straight up through the
+      # doorway from Nav2's goal, steering onto heading_deg on the map (held
+      # on odom; Nav2 no longer turns to it), slower while still far off it,
+      # until the map y reaches end_y - past the doorway's far side (1.70) by
+      # more than the robot's 0.07 m half length. straight_m caps it if TF
+      # is gone, max_s if it is held up. Then follow_lane_after above.
+      exit:
+        enabled: true
+        heading_deg: 90.0
+        end_y: 1.85
+        straight_m: 0.70    # 0.70 on 2026-11-05 (was 0.60): the way onto the centre line is longer
+        speed: 0.12
+        max_s: 8.0
+        # 2026-11-05: steer onto the doorway's centre line x = door_x (middle
+        # of 1.749-1.949 on tunnel_gimp.pgm), aiming lookahead_m ahead on it,
+        # w = kp x error (rad) up to max_angular; more than spin_deg off the aim
+        # turns on the spot first. Nav2 stopped 0.08-0.14 m left of the line
+        # in five runs, and holding 90 deg from there scraped the left post
+        # (1104_2346, 1105_0735 out at x 1.71). Map pose from TF (AMCL).
+        # Picked by replaying the six real stop poses on the map's walls:
+        # lookahead 0.15 / kp 2 / spin 25 swung a corner 4.7 cm into a post,
+        # 0.06 / 3 / 15 0.6 cm - the map's doorway leaves the robot 1.1 cm a
+        # side even dead centre, so nothing comes out clear on paper.
+        door_x: 1.85
+        # 2026-11-06: within on_line_m of x = door_x, or past y door_y (the
+        # doorway's mouth), aim far_lookahead_m ahead instead of lookahead_m
+        # - the short aim is for getting onto the line clear of the posts,
+        # but on it a 1 cm wobble in AMCL's x swung it ~10 deg and the robot
+        # weaved 81-95 deg through the door (1106_0331).
+        on_line_m: 0.01     # 0.02 / 0.20 simulated: weave 79-94 deg but up to 1.5 cm off the line in the doorway; 0.01 / 0.15: 0.9 cm (old 0.6)
+        door_y: 1.55
+        far_lookahead_m: 0.15
+        lookahead_m: 0.06
+        kp: 3.0
+        max_angular: 0.6
+        spin_deg: 15.0
 
       speed: 0.04
 

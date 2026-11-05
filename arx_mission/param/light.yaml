@@ -54,12 +54,12 @@
       lightness_l: 73
       lightness_h: 228
     green:
-      hue_l: 45
-      hue_h: 82
-      saturation_l: 151
-      saturation_h: 255
-      lightness_l: 51
-      lightness_h: 71
+      hue_l: 25
+      hue_h: 67
+      saturation_l: 77
+      saturation_h: 198
+      lightness_l: 72
+      lightness_h: 106
 
     # The box a blob has to land in to count, in pixels of the 320x240 input.
     # These four were four expressions inside find_circle_of_traffic_light -
@@ -71,10 +71,10 @@
     # every image downstream looks like a colour problem. Adjustable live from
     # rqt_reconfigure, and drawn on all four debug images.
     roi:
-      x_min: 165
-      x_max: 252
-      y_min: 14
-      y_max: 129
+      x_min: 246
+      x_max: 320
+      y_min: 17
+      y_max: 116
 
     # 0 = look at every frame. The original dropped two frames in three,
     # which turns a 10 fps camera into 3.3 fps and makes each frame of
