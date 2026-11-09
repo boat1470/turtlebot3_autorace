@@ -96,6 +96,12 @@ COMMANDS = (
     # and extrinsic for /camera/image_compensated; left out of "start all".
     ('calibration', 'sign', 'detect_sign (always on)',
      'ros2 launch arx_mission detect_sign.launch.py always_on:=true'),
+    # detect_obstacle on its own, looking all the time, for checking what the
+    # LiDAR sees (lane_debug obstacle / front images). Left out of "start
+    # all", and stopped by start mission like the rest of the group -
+    # full.launch runs its own, under the same node name. 2026-11-08.
+    ('calibration', 'obst', 'detect_obstacle (always on)',
+     'ros2 launch arx_mission detect_obstacle.launch.py always_on:=true'),
     # The HC-SR04 measuring whatever mission is armed, to check it reads
     # before a level_source both / ultrasonic run (lane_debug shows
     # /detect/level_range). On the Pi - it is wired to the Pi's GPIO - but
@@ -105,7 +111,7 @@ COMMANDS = (
      'ros2 launch arx_ultrasonic_bringup ultrasonic.launch.py always_on:=true'),
 )
 # Calibration jobs "start all" leaves alone - started by their own button.
-NOT_IN_START_ALL = ('sign', 'sonarA')
+NOT_IN_START_ALL = ('sign', 'sonarA', 'obst')
 
 # The full stack on this PC, started at whichever of full.launch.py's presets
 # is picked. The list is read from the launch file, so a new preset shows up
@@ -116,7 +122,7 @@ MISSION_CMD = 'ros2 launch arx_mission full.launch.py sim:=false start:={}'
 # Where the launcher's output is kept, a file a day - see Window.save_line.
 RUNS_DIR = os.path.expanduser('~/runs')
 # What reads mission 5's bar - full.launch level_source, always passed.
-# camera (detect_level here) is the default since 2026-10-25; ultrasonic is
+# both is the launcher's default since 2026-11-08 (camera before); ultrasonic is
 # the Pi's HC-SR04; both is the camera's DOWN with the HC-SR04's distances.
 LEVEL_SOURCES = (('ultrasonic', 'ultrasonic (Pi)'), ('camera', 'camera'),
                  ('both', 'camera DOWN + ultrasonic stop/lift'))
@@ -508,7 +514,8 @@ class Window:
         # calibration group first - two of each fight over the same topics.
         names = presets()
         self.preset = tk.StringVar(value='full' if 'full' in names else names[0])
-        self.level_source = tk.StringVar(value='camera')
+        # Default both (2026-11-08): the camera's DOWN, the HC-SR04's stop and lift.
+        self.level_source = tk.StringVar(value='both')
         self.lane_masks = tk.BooleanVar(value=False)
         self.mission = Job('run', 'full.launch', self.mission_command(), self.out)
         self.jobs.append(self.mission)
@@ -610,6 +617,15 @@ class Window:
             self.mission.stop()
             # The next run measures every heading from where odom is now.
             self.reset_nag = True
+            return
+        # level_source ultrasonic or both stops and leaves the bar on the
+        # HC-SR04's range - with no node on the Pi there is none, and the robot
+        # waits at the bar for nothing. Either Pi button will do (ARX 2026-11-08).
+        if self.level_source.get() in ('ultrasonic', 'both') and not any(
+                j.running() for j in self.jobs if j.tag in ('sonar', 'sonarA')):
+            self.out.append(f'[run] not started - level_source {self.level_source.get()} '
+                            'needs the ultrasonic: start "level ultrasonic" or '
+                            '"ultrasonic (always on)" first, or pick camera')
             return
         self.reset_nag = False
         # The Pi's always-on ultrasonic stays up: it is not part of the
