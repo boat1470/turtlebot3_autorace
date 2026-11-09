@@ -66,6 +66,15 @@ TARGETS = {
               'sign.left', 'sign.right', 'sign.construction', 'sign.parking',
               'sign.tunnel'), 'arx_mission/param/sign.yaml'),
     'obstacle': (('obstacle',), 'arx_mission/param/obstacle.yaml'),
+    # The extrinsic step's four corners (/camera/image_projection). The keys
+    # one by one, not the namespace: image_compensation has
+    # camera.extrinsic_camera_calibration.clip_hist_percent too, and that
+    # lives in compensation.yaml. Installed as a symlink to this file, so no
+    # rebuild after saving - restart the camera pipeline to load it.
+    # Take lane.half_lane_px again afterwards (lane_width.py). 2026-11-08.
+    'projection': (tuple(f'camera.extrinsic_camera_calibration.{k}'
+                         for k in ('top_x', 'top_y', 'bottom_x', 'bottom_y')),
+                   'turtlebot3_autorace_camera/calibration/extrinsic_calibration/projection.yaml'),
 }
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
