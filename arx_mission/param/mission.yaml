@@ -27,7 +27,7 @@
       give_up_s: 30.0
 
     light:
-      enabled: true #เริ่มโดยการรอไฟแดงไหม  - true 2026-11-03: the competition starts on the light
+      enabled: false #เริ่มโดยการรอไฟแดงไหม - false 2026-11-08: start without waiting for the light (still waits for detect_lane); true for the competition
       # Frames of green, not ticks. Three frames at 10 fps is 0.3 s.
       confirm_frames: 3
       # Act on the change to green, not on a green that was already burning
@@ -328,6 +328,15 @@
       # why with the robot standing there. Ends the run: false to score.
       stop_when_white_lost: false
       white_lost_ticks: 1
+      # 2026-11-09, camera moved: yellow now leaves the view before 7A's inner
+      # white line, so lane_state goes 2 -> 3 -> 0, never 1, and the arc
+      # started 0.8 s late (-122 deg against -101) after crawling and jerking
+      # on a short bent white fit (1109_0426 / 0447 / 0502). Count white as
+      # lost too while it is alone (lane_state 3) and /detect/lane_ahead is
+      # right of this pixel. In those runs that first came at 4.53-4.61 s
+      # (old camera 4.7 s) and nowhere else between the junction and the
+      # boards; never in the old-camera runs. 0 = off.
+      white_lost_ahead_px: 650.0
       # Instead of stopping: once white is gone for white_lost_ticks, drive
       # one fixed arc of radius_m (angular = speed / radius_m) the side's
       # way until both lines are back (lane_state 2 for back_ticks, after
@@ -340,7 +349,9 @@
         side: right
         # 0.22 on 2026-10-14 (was 0.25): run 1014_2304 sat ~7 cm outside the
         # lane centre round 7A. 0.14 m/s keeps the outer wheel at 0.19.
-        radius_m: 0.23
+        # 0.25 on 2026-11-09 (was 0.23): 7A still cut in with the new camera.
+        # 0.14 m/s keeps the outer wheel at 0.14 x (1 + 0.08/0.25) = 0.185.
+        radius_m: 0.25
         # 0.14. 0.15 tried 2026-10-25 (1025_1058, 1025_1327): no faster - the
         # arc ends where both lines come back, not after a time - and the curve
         # before construction overran to +34 deg.
@@ -360,6 +371,12 @@
         # keeps arcing until both (2039: 140 degrees).
         5b_window_s: 2.0
         5b_end_heading_deg: 90.0
+        # 2026-11-09: when white_lost_ahead_px started it (log: "white alone,
+        # ahead ... px"), straight on this far first. That rule fires at
+        # 0.912 m from the junction (1109_0522) against 0.944-0.96 m where
+        # white used to drop out with the old camera; the arc began ~3 cm
+        # early and cut in. 0 = arc at once.
+        ahead_pre_m: 0.035
 
       # The left branch's mirror (2026-10-25): there yellow is the inner
       # line. Gone for yellow_lost_ticks (lane_state 0 or 3) and the robot
@@ -708,7 +725,11 @@
       # comes out between the two yellow walls. Wins over the stop.
       left_arc:
         enabled: true
-        pre_m: 0.0
+        # 0.05 on 2026-11-09 (was 0.0): camera moved, projection 68/36/173/109
+        # sees further, so the yellow drops out of view earlier. A try - set
+        # back to 0.0 if the arc now comes out too far into the lot.
+        # 0.10 later on 2026-11-09, asked for after trying 0.05.
+        pre_m: 0.10
         # 0.20 on 2026-10-13 (was 0.25): the arc came out too wide on the course.
         radius_m: 0.20
         # 0.14 with R 0.20: outer wheel 0.14 x 1.4 = 0.196, under 0.21

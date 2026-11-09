@@ -116,7 +116,11 @@
       # change over in curves, where the gap has opened to ~500 px first: the
       # centre jumped +41..+44 px dropping to the white line alone in 1A with
       # 211 (runs 1019, 1033, 1043) against +31 with 218 (0148).
-      half_lane_px: 198 #218
+      #
+      # 200 on 2026-11-08, camera moved, projection.yaml 68/36/173/109:
+      # lane_width.py on a straight, width 399.5-401.5 px from row 300 to 580
+      # (half 199.8 at lookahead_row 580). Was 198 on 100/13/168/105.
+      half_lane_px: 200
 
       # Added to half_lane_px while leaving the parking lot (park phase 5,
       # FOLLOW_YELLOW_WIDE), and nowhere else. 20 px is ~13 mm at 1.49 px/mm
@@ -161,7 +165,13 @@
       # /detect/lane_ahead, for control_lane to brake on (its
       # speed_from_ahead). 300 is ~0.19 m ahead of row 580 at 1.49 px/mm.
       # Drawn as a hollow ring. 0 publishes nothing.
-      speed_row: 300
+      #
+      # 400 on 2026-11-09 (was 300): camera moved, projection 68/36/173/109
+      # sees further. At 300 the ring landed on 18B's curve at 52-62 px while
+      # row 580 was still on the straight - v fell to 0.02 for ~2 s leaving
+      # the bay (1109_0403, 6.4 s against 3.7 s in 1108_2058). A try; check
+      # the curves still slow in time.
+      speed_row: 400
 
       # Drop white pixels left of the yellow line (plus this margin) before
       # fitting the white one: a lane's white line is always right of its
