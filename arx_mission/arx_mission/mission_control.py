@@ -494,10 +494,6 @@ class MissionControl(Node):
         # looked at with the robot standing there. Ends the run.
         self.declare_parameter('construction.stop_when_white_lost', False)
         self.declare_parameter('construction.white_lost_ticks', 3)
-        # ARX 2026-11-09: also count white as lost while detect_lane steers by
-        # white alone (lane_state 3) and /detect/lane_ahead is right of this
-        # pixel. 0 = off. See mission.yaml.
-        self.declare_parameter('construction.white_lost_ahead_px', 0.0)
         # ARX: instead of stopping, drive a fixed arc of radius_m (angular =
         # speed / radius_m, the side's way) until both lines are back - lane_state
         # 2 for back_ticks ticks, after min_s - or timeout_s is up (0 = never), then
@@ -506,9 +502,6 @@ class MissionControl(Node):
         self.declare_parameter('construction.white_lost_arc.side', 'right')
         self.declare_parameter('construction.white_lost_arc.radius_m', 0.25)
         self.declare_parameter('construction.white_lost_arc.speed', 0.10)
-        # ARX 2026-11-09: straight on this far before the arc when it was
-        # white_lost_ahead_px, not white dropping out, that started it.
-        self.declare_parameter('construction.white_lost_arc.ahead_pre_m', 0.0)
         self.declare_parameter('construction.white_lost_arc.back_ticks', 2)
         # What ends it: 'both' - lane_state 2; 'yellow' - 1 or 2, the yellow
         # line in view with or without white; 'yellow_pair' - two yellow lines
@@ -1335,7 +1328,6 @@ class MissionControl(Node):
         # second and tick reads only the latest; at 7A the white line can be
         # gone for a single frame before yellow goes too, and tick missed it.
         self.white_lost_at = None
-        self.white_lost_why = None      # what set white_lost_at, for the log
         self.lane_wait_said = None
         self.ready_sounded = False
         self.sound_wanted_at = None     # warm-up done, beep not sent yet
@@ -1427,8 +1419,6 @@ class MissionControl(Node):
         self.lot_from_arc = False
         self.lot_pair_lost = 0
         self.wl_arc_since = None        # ARX: white_lost_arc running since
-        self.wl_pre_mark = None         # ARX: straight before it, from here
-        self.wl_pre_yaw = None          # ARX: ...holding the heading it had then
         self.wl_arc_back = 0
         self.wl_arc_5b = False          # ARX: this arc is the one in 5B
         self.wl_arc_line = 'white'      # ARX: which lost line the arc is for
@@ -1531,7 +1521,6 @@ class MissionControl(Node):
         self.nav_sent_at = None
         self.amcl_xy = None
         self.create_subscription(UInt8, '/detect/lane_state', self.on_lane_state, 1)
-        self.create_subscription(Float64, '/detect/lane_ahead', self.on_lane_ahead, 1)
         self.create_subscription(UInt8, '/arx/traffic_light', self.on_light, 1)
         self.create_subscription(UInt8, '/detect/traffic_sign', self.on_sign, 1)
         self.create_subscription(Odometry, '/odom', self.on_odom, 1)
@@ -1781,21 +1770,6 @@ class MissionControl(Node):
         self.lane_stamps.append(self.now())
         if msg.data in (0, 1):
             self.white_lost_at = self.lane_stamps[-1]
-            self.white_lost_why = None
-
-    def on_lane_ahead(self, msg):
-        """White alone, bending away right up the frame: 7A's inner line (ARX).
-
-        With the camera moved on 2026-11-09 yellow leaves the view before the
-        inner white line does, so lane_state went 2 -> 3 -> 0 and never 1, and
-        the arc started 0.8 s late at -122 deg instead of -101, after the
-        robot had crawled and jerked on a short bent white fit. The ahead
-        centre of that fit is past 650 px at the moment white used to drop.
-        """
-        px = self.get_parameter('construction.white_lost_ahead_px').value
-        if px > 0 and self.lane_state == 3 and msg.data > px:
-            self.white_lost_at = self.now()
-            self.white_lost_why = f'white alone, ahead {msg.data:.0f} px'
 
     def lane_ready(self, now):
         """Whether detect_lane has kept up start.min_lane_hz, with no gap over
@@ -2557,25 +2531,6 @@ class MissionControl(Node):
         if self.wl_arc_since is not None:
             self.tick_white_lost_arc(now)
             return
-        if self.wl_pre_mark is not None:
-            # ahead_pre_m: straight on at the arc's speed, then the arc.
-            gone = self.dist_from(self.wl_pre_mark) or 0.0
-            if gone < self.get_parameter('construction.white_lost_arc.ahead_pre_m').value:
-                # Held, not just zero: the lane follower was turning right
-                # hard on the bent white fit when this began, and with 0 the
-                # robot carried on round 7-15 deg (-104 -> -111 / -119 in
-                # 1109_0709 / 0527), so the arc began already turned in.
-                self.set_avoid(True, angular=self.correction_to(self.wl_pre_yaw),
-                               linear=self.get_parameter('construction.white_lost_arc.speed').value)
-                return
-            self.wl_pre_mark = None
-            self.wl_arc_line = 'white'
-            self.wl_arc_since, self.wl_arc_back = now, 0
-            self.wl_arc_5b = False
-            where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
-            self.get_logger().info(f'{gone:.3f} m straight - now the arc, facing {where}')
-            self.tick_white_lost_arc(now)
-            return
         # Right branch only: there the inner line is white and leaves the
         # view in 7A. On the left branch white is the outer line, and a right
         # arc there would be the wrong way.
@@ -2591,21 +2546,6 @@ class MissionControl(Node):
             if self.white_lost_ticks >= need:
                 where = 'unknown' if self.yaw is None else f'{self.yaw:+.1f} deg'
                 self.white_lost_ticks = 0
-                how = (f'lane_state {self.lane_state}' if self.white_lost_why is None
-                       or self.lane_state in (0, 1) else self.white_lost_why)
-                pre = self.get_parameter('construction.white_lost_arc.ahead_pre_m').value
-                if (arc_on and pre > 0 and self.lane_state not in (0, 1)
-                        and self.white_lost_why is not None and self.pos is not None
-                        and now - self.stage_since > self.get_parameter(
-                            'construction.white_lost_arc.5b_window_s').value):
-                    self.wl_pre_mark = self.pos
-                    self.wl_pre_yaw = self.yaw
-                    self.get_logger().info(
-                        f'white line gone for {need} ticks ({how}, facing {where}) - '
-                        f'straight on {pre:.3f} m, then arcing')
-                    self.set_avoid(True, angular=self.correction_to(self.wl_pre_yaw),
-                                   linear=self.get_parameter('construction.white_lost_arc.speed').value)
-                    return
                 if arc_on:
                     self.wl_arc_line = 'white'
                     self.wl_arc_since, self.wl_arc_back = now, 0
@@ -2614,13 +2554,13 @@ class MissionControl(Node):
                     if self.get_parameter('construction.white_lost_arc.until').value == 'yellow_pair':
                         self.set_follow_side(FOLLOW_YELLOW_PAIR)
                     self.get_logger().info(
-                        f'white line gone for {need} ticks ({how}, '
+                        f'white line gone for {need} ticks (lane_state {self.lane_state}, '
                         f'facing {where}) - arcing until '
                         f'{self.get_parameter("construction.white_lost_arc.until").value} is in view')
                     self.tick_white_lost_arc(now)
                     return
-                self.stop(f'white line gone for {need} ticks ({how}, '
-                          f'facing {where}) - stopping here, as asked')
+                self.stop(f'white line gone for {need} ticks (lane_state '
+                          f'{self.lane_state}, facing {where}) - stopping here, as asked')
                 return
 
         # ARX: see construction.yellow_lost_arc. Left branch only, where
